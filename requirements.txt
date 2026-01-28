@@ -1,3 +1,8 @@
-python-telegram-bot==21.3
+# Telegram Bot
+python-telegram-bot[job-queue]==20.7
+
+# PDF генерация
 reportlab==4.2.5
-Pillow==10.4.0
+
+# База данных (встроенная в Python, но для ясности)
+# sqlite3 - included in Python standard library

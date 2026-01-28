@@ -71,11 +71,40 @@ class Database:
                 )
             """)
             
+            # Таблица супервизоров
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS supervisors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL UNIQUE,
+                    name TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Таблица запросов на расшифровку
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS transcription_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    pet_id INTEGER NOT NULL,
+                    pdf_file_id TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    supervisor_id INTEGER,
+                    transcription TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    FOREIGN KEY (pet_id) REFERENCES pets(id),
+                    FOREIGN KEY (supervisor_id) REFERENCES supervisors(id)
+                )
+            """)
+            
             # Индексы для быстрого поиска
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pets_user ON pets(user_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_records_pet ON records(pet_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reminders_pet ON reminders(pet_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_transcription_status ON transcription_requests(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_supervisors_user ON supervisors(user_id)")
     
     # === Питомцы ===
     
@@ -245,5 +274,126 @@ class Database:
                    WHERE pet_id = ? AND status = 'pending'
                    ORDER BY remind_at ASC""",
                 (pet_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    
+    # === Супервизоры ===
+    
+    def add_supervisor(self, user_id: int, name: str = None) -> int:
+        """Добавить супервизора"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO supervisors (user_id, name) VALUES (?, ?)",
+                (user_id, name)
+            )
+            return cursor.lastrowid
+    
+    def remove_supervisor(self, user_id: int):
+        """Удалить супервизора"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM supervisors WHERE user_id = ?",
+                (user_id,)
+            )
+    
+    def is_supervisor(self, user_id: int) -> bool:
+        """Проверить, является ли пользователь супервизором"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM supervisors WHERE user_id = ?",
+                (user_id,)
+            )
+            return cursor.fetchone() is not None
+    
+    def get_supervisor_by_user_id(self, user_id: int) -> Optional[Dict]:
+        """Получить супервизора по user_id"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM supervisors WHERE user_id = ?",
+                (user_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_all_supervisors(self) -> List[Dict]:
+        """Получить всех супервизоров"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM supervisors")
+            return [dict(row) for row in cursor.fetchall()]
+    
+    # === Запросы на расшифровку ===
+    
+    def create_transcription_request(self, user_id: int, pet_id: int, pdf_file_id: str) -> int:
+        """Создать запрос на расшифровку"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO transcription_requests (user_id, pet_id, pdf_file_id, status) 
+                   VALUES (?, ?, ?, 'pending')""",
+                (user_id, pet_id, pdf_file_id)
+            )
+            return cursor.lastrowid
+    
+    def get_transcription_request(self, request_id: int) -> Optional[Dict]:
+        """Получить запрос на расшифровку по ID"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM transcription_requests WHERE id = ?",
+                (request_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_pending_transcription_requests(self) -> List[Dict]:
+        """Получить ожидающие запросы на расшифровку"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT * FROM transcription_requests 
+                   WHERE status = 'pending'
+                   ORDER BY created_at ASC"""
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def assign_transcription_to_supervisor(self, request_id: int, supervisor_id: int):
+        """Назначить запрос супервизору"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE transcription_requests 
+                   SET status = 'in_progress', supervisor_id = ? 
+                   WHERE id = ?""",
+                (supervisor_id, request_id)
+            )
+    
+    def complete_transcription_request(self, request_id: int, transcription: str):
+        """Завершить запрос на расшифровку"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """UPDATE transcription_requests 
+                   SET status = 'completed', 
+                       transcription = ?,
+                       completed_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (transcription, request_id)
+            )
+    
+    def get_user_transcription_history(self, user_id: int, limit: int = 10) -> List[Dict]:
+        """Получить историю расшифровок пользователя"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT * FROM transcription_requests 
+                   WHERE user_id = ?
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (user_id, limit)
             )
             return [dict(row) for row in cursor.fetchall()]
