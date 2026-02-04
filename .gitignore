@@ -1,0 +1,4 @@
+venv
+pet_health.db
+__pycache__
+.idea

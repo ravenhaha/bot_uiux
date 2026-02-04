@@ -24,7 +24,8 @@ def get_main_menu_keyboard():
     """Главное меню с кнопками"""
     keyboard = [
         [KeyboardButton("🐾 Мой питомец"), KeyboardButton("🔔 Напоминания")],
-        [KeyboardButton("📋 История"), KeyboardButton("📄 Расшифровка")],
+        [KeyboardButton("📋 История"), KeyboardButton("📄 Экспорт PDF")],
+        [KeyboardButton("📝 Заметка")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -48,6 +49,13 @@ USER_STATES = {}
 STATE_ONBOARDING_NAME = "onboarding_name"
 STATE_ONBOARDING_TYPE = "onboarding_type"
 STATE_ONBOARDING_TIMEZONE = "onboarding_timezone"
+STATE_ONBOARDING_GENDER = "onboarding_gender"
+STATE_ONBOARDING_BREED = "onboarding_breed"
+STATE_ONBOARDING_BIRTHDATE = "onboarding_birthdate"
+STATE_ONBOARDING_WEIGHT = "onboarding_weight"
+STATE_ONBOARDING_VACCINATIONS = "onboarding_vaccinations"
+STATE_ONBOARDING_PHOTO = "onboarding_photo"
+STATE_ONBOARDING_OWNER = "onboarding_owner"
 STATE_REMINDER_TEXT = "reminder_text"
 STATE_REMINDER_DAY = "reminder_day"
 STATE_REMINDER_TIME = "reminder_time"
@@ -59,6 +67,8 @@ STATE_EDIT_PET_NAME = "edit_pet_name"
 STATE_WAITING_FOR_PDF = "waiting_for_pdf"
 STATE_SUPERVISOR_TRANSCRIPTION = "supervisor_transcription"
 STATE_NORMAL = "normal"
+STATE_NOTE_TEXT = "note_text"
+STATE_NOTE_TAG = "note_tag"
 
 # Серверный часовой пояс (Москва)
 SERVER_TIMEZONE = "+03:00"
@@ -109,32 +119,43 @@ DAYS_OF_WEEK = {
     6: "Воскресенье"
 }
 
+# Сокращения дней недели для кнопок
+DAY_ABBREV = {
+    0: "ПН",
+    1: "ВТ",
+    2: "СР",
+    3: "ЧТ",
+    4: "ПТ",
+    5: "СБ",
+    6: "ВС",
+}
+
 # Часовые пояса (популярные)
 TIMEZONES = [
     ("-12:00", "UTC-12:00"),
     ("-11:00", "UTC-11:00"),
-    ("-10:00", "UTC-10:00 (Гавайи)"),
-    ("-09:00", "UTC-09:00 (Аляска)"),
-    ("-08:00", "UTC-08:00 (Лос-Анджелес)"),
-    ("-07:00", "UTC-07:00 (Денвер)"),
-    ("-06:00", "UTC-06:00 (Чикаго)"),
-    ("-05:00", "UTC-05:00 (Нью-Йорк)"),
+    ("-10:00", "UTC-10:00"),
+    ("-09:00", "UTC-09:00"),
+    ("-08:00", "UTC-08:00"),
+    ("-07:00", "UTC-07:00"),
+    ("-06:00", "UTC-06:00"),
+    ("-05:00", "UTC-05:00"),
     ("-04:00", "UTC-04:00"),
     ("-03:00", "UTC-03:00"),
     ("-02:00", "UTC-02:00"),
     ("-01:00", "UTC-01:00"),
-    ("+00:00", "UTC+00:00 (Лондон)"),
-    ("+01:00", "UTC+01:00 (Берлин)"),
-    ("+02:00", "UTC+02:00 (Киев)"),
-    ("+03:00", "UTC+03:00 (Москва)"),
-    ("+04:00", "UTC+04:00 (Дубай)"),
-    ("+05:00", "UTC+05:00 (Ташкент)"),
-    ("+05:30", "UTC+05:30 (Дели)"),
-    ("+06:00", "UTC+06:00 (Алматы)"),
-    ("+07:00", "UTC+07:00 (Бангкок)"),
-    ("+08:00", "UTC+08:00 (Пекин)"),
-    ("+09:00", "UTC+09:00 (Токио)"),
-    ("+10:00", "UTC+10:00 (Сидней)"),
+    ("+00:00", "UTC+00:00"),
+    ("+01:00", "UTC+01:00"),
+    ("+02:00", "UTC+02:00"),
+    ("+03:00", "UTC+03:00"),
+    ("+04:00", "UTC+04:00"),
+    ("+05:00", "UTC+05:00"),
+    ("+05:30", "UTC+05:30"),
+    ("+06:00", "UTC+06:00"),
+    ("+07:00", "UTC+07:00"),
+    ("+08:00", "UTC+08:00"),
+    ("+09:00", "UTC+09:00"),
+    ("+10:00", "UTC+10:00"),
     ("+11:00", "UTC+11:00"),
     ("+12:00", "UTC+12:00"),
 ]
@@ -166,6 +187,9 @@ def clear_user_state(user_id: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start — онбординг"""
     user_id = update.effective_user.id
+    # На всякий случай очищаем старые состояния (напоминания и т.п.),
+    # чтобы они не мешали новому онбордингу
+    clear_user_state(user_id)
     
     # Проверяем, является ли пользователь супервизором
     if db.is_supervisor(user_id):
@@ -203,7 +227,7 @@ async def handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка шагов онбординга"""
     user_id = update.effective_user.id
     state = get_user_state(user_id)
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
     
     if state == STATE_ONBOARDING_NAME:
         # Сохраняем имя, спрашиваем тип
@@ -223,6 +247,147 @@ async def handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{text} — отличное имя! Это кошка или собака?",
             reply_markup=reply_markup
+        )
+        return True
+
+    # Дополнительные вопросы онбординга (пол, порода, дата рождения, вес, прививки, владелец)
+    from database import Database  # только для подсветки типов, в рантайме уже импортировано
+
+    if state == STATE_ONBOARDING_GENDER:
+        # Пол питомца
+        gender_norm = text.lower()
+        gender = None
+        if gender_norm in ("м", "мальчик", "самец"):
+            gender = "м"
+        elif gender_norm in ("ж", "девочка", "самка"):
+            gender = "ж"
+
+        if not gender and gender_norm and not gender_norm.startswith("пропус"):
+            await update.message.reply_text(
+                "Укажи пол питомца: м/ж.\n\n"
+                "Чтобы пропустить пункт, напиши «Пропустить»."
+            )
+            return True
+
+        if gender:
+            db.update_pet_details(user_id, gender=gender)
+
+        set_user_state(user_id, STATE_ONBOARDING_BREED)
+        await update.message.reply_text(
+            "Какой породы питомец?\n\n"
+            "Например: «британская короткошёрстная» или «лабрадор».\n"
+            "Чтобы пропустить пункт, напиши «Пропустить»."
+        )
+        return True
+
+    if state == STATE_ONBOARDING_BREED:
+        if text and not text.lower().startswith("пропус"):
+            db.update_pet_details(user_id, breed=text)
+
+        set_user_state(user_id, STATE_ONBOARDING_BIRTHDATE)
+        await update.message.reply_text(
+            "Когда у питомца дата рождения?\n\n"
+            "Формат: ДД.ММ.ГГГГ, например 05.03.2021.\n"
+            "Можно написать «Пропустить»."
+        )
+        return True
+
+    if state == STATE_ONBOARDING_BIRTHDATE:
+        if text and not text.lower().startswith("пропус"):
+            # Лёгкая валидация формата, но не жесткая
+            import re
+            if re.match(r"^\d{1,2}\.\d{1,2}\.\d{4}$", text):
+                db.update_pet_details(user_id, birth_date=text)
+            else:
+                await update.message.reply_text(
+                    "Не похоже на дату. Введи в формате ДД.ММ.ГГГГ.\n\n"
+                    "Чтобы пропустить пункт, напиши «Пропустить»."
+                )
+                return True
+
+        set_user_state(user_id, STATE_ONBOARDING_WEIGHT)
+        await update.message.reply_text(
+            "Сколько весит питомец сейчас? (в кг)\n\n"
+            "Например: 4.2\n"
+            "Чтобы пропустить пункт, напиши «Пропустить»."
+        )
+        return True
+
+    if state == STATE_ONBOARDING_WEIGHT:
+        if text and not text.lower().startswith("пропус"):
+            try:
+                weight = float(text.replace(",", "."))
+                db.update_pet_details(user_id, weight=weight)
+            except ValueError:
+                await update.message.reply_text(
+                    "Не получилось распознать вес. Введи число, например 4.2.\n\n"
+                    "Чтобы пропустить пункт, напиши «Пропустить»."
+                )
+                return True
+
+        set_user_state(user_id, STATE_ONBOARDING_VACCINATIONS)
+        await update.message.reply_text(
+            "Есть ли сведения о вакцинации?\n\n"
+            "Например: «комплексная прививка весна 2024», «бешенство февраль 2025».\n"
+            "Чтобы пропустить пункт, напиши «Пропустить»."
+        )
+        return True
+
+    if state == STATE_ONBOARDING_VACCINATIONS:
+        if text and not text.lower().startswith("пропус"):
+            db.update_pet_details(user_id, vaccinations=text)
+
+        set_user_state(user_id, STATE_ONBOARDING_PHOTO)
+        await update.message.reply_text(
+            "Пришли, пожалуйста, фото питомца 🐾\n\n"
+            "Чтобы пропустить пункт, напиши «Пропустить»."
+        )
+        return True
+
+    if state == STATE_ONBOARDING_OWNER:
+        if text and not text.lower().startswith("пропус"):
+            db.update_pet_details(user_id, owner_name=text)
+
+        # После завершения анкеты формируем мини-PDF «паспорт питомца»
+        pet = db.get_pet(user_id)
+
+        # Пытаемся скачать фото питомца, если оно есть
+        pet_photo_path = None
+        photo_id = pet.get("photo_id") if pet else None
+        if photo_id:
+            try:
+                file = await context.bot.get_file(photo_id)
+                pet_photo_path = f"/tmp/pet_{pet['id']}_passport.jpg"
+                await file.download_to_drive(pet_photo_path)
+            except Exception as e:
+                logger.error(f"Не удалось скачать фото питомца для паспорта: {e}")
+                pet_photo_path = None
+
+        if pet:
+            try:
+                # Мини-отчёт без записей и напоминаний
+                pdf_path = generate_pdf_report(pet, [], [], pet_photo_path)
+                from telegram import InputFile  # локальный импорт на всякий случай
+                from pathlib import Path as _Path
+
+                await update.message.reply_text(
+                    "Готово! Я собрал мини‑паспорт питомца в PDF и прикрепил ниже."
+                )
+
+                with open(pdf_path, "rb") as f:
+                    await context.bot.send_document(
+                        chat_id=user_id,
+                        document=InputFile(f, filename=_Path(pdf_path).name),
+                        caption="📄 Паспорт питомца"
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при генерации паспорта питомца: {e}")
+
+        clear_user_state(user_id)
+        await update.message.reply_text(
+            "Спасибо! Я сохранил данные о питомце и владельце. 🐾\n\n"
+            "Теперь можно присылать заметки и пользоваться напоминаниями.",
+            reply_markup=get_main_menu_keyboard()
         )
         return True
     
@@ -245,13 +410,13 @@ async def handle_pet_type_callback(update: Update, context: ContextTypes.DEFAULT
     # Сохраняем тип, переходим к выбору часового пояса
     user_data["type"] = pet_type
     set_user_state(user_id, STATE_ONBOARDING_TIMEZONE, user_data)
-
-    # Показываем популярные часовые пояса
+    
+    # Показываем популярные часовые пояса (без названий городов)
     keyboard = [
-        [InlineKeyboardButton("UTC+03:00 (Москва)", callback_data="tz_+03:00")],
-        [InlineKeyboardButton("UTC+02:00 (Киев)", callback_data="tz_+02:00")],
-        [InlineKeyboardButton("UTC+05:00 (Ташкент)", callback_data="tz_+05:00")],
-        [InlineKeyboardButton("UTC+06:00 (Алматы)", callback_data="tz_+06:00")],
+        [InlineKeyboardButton("UTC+03:00", callback_data="tz_+03:00")],
+        [InlineKeyboardButton("UTC+02:00", callback_data="tz_+02:00")],
+        [InlineKeyboardButton("UTC+05:00", callback_data="tz_+05:00")],
+        [InlineKeyboardButton("UTC+06:00", callback_data="tz_+06:00")],
         [InlineKeyboardButton("Другой часовой пояс...", callback_data="tz_other")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -305,20 +470,16 @@ async def handle_timezone_callback(update: Update, context: ContextTypes.DEFAULT
 
     # Создаём питомца с часовым поясом
     db.create_pet(user_id, pet_name, pet_type, timezone)
-    clear_user_state(user_id)
-
+    # Переходим к расширенному онбордингу (пол, порода и т.д.)
+    set_user_state(user_id, STATE_ONBOARDING_GENDER)
+    
     await query.edit_message_text(
         f"Готово! 🎉\n\n"
         f"{pet_name} добавлен.\n"
         f"Часовой пояс: UTC{timezone}\n\n"
-        f"Ты можешь присылать фото и заметки о питомце."
-    )
-
-    # Отправляем отдельное сообщение с меню
-    await context.bot.send_message(
-        chat_id=query.from_user.id,
-        text="Используй меню внизу для навигации 👇",
-        reply_markup=get_main_menu_keyboard()
+        f"Давай добавим ещё немного информации.\n\n"
+        f"Какой пол у питомца? м/ж\n"
+        f"Можно написать «Пропустить»."
     )
 
 
@@ -365,7 +526,7 @@ async def handle_reminder_flow(update: Update, context: ContextTypes.DEFAULT_TYP
         days_row = []
         for i in range(7):
             day = (today + timedelta(days=i)).weekday()
-            day_name = DAYS_OF_WEEK[day][:2]  # Сокращённое название
+            day_name = DAY_ABBREV[day]
             days_row.append(InlineKeyboardButton(day_name, callback_data=f"day_week_{day}"))
             if len(days_row) == 4:
                 keyboard.append(days_row)
@@ -688,7 +849,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    records = db.get_records(pet["id"], limit=10)
+    records = db.get_all_records(pet["id"])
     
     if not records:
         await update.message.reply_text(
@@ -697,16 +858,54 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    history_text = f"📋 Последние события {pet['name']}:\n\n"
-    
+    # Формируем красивую ленту с тегами
+    entries = []
     for record in records:
-        date = datetime.fromisoformat(record["created_at"]).strftime("%d %B")
-        tag = f"· {record['tag']}" if record.get("tag") else ""
-        text = record["text"][:50] + "..." if record["text"] and len(record["text"]) > 50 else (record["text"] or "")
+        try:
+            dt = datetime.fromisoformat(record["created_at"])
+            date_str = dt.strftime("%d.%m.%Y")
+            time_str = dt.strftime("%H:%M")
+        except Exception:
+            date_str = record.get("created_at", "")[:10]
+            time_str = ""
+        tag_value = record.get("tag")
+        if tag_value:
+            tag_str = f"🏷 #{tag_value}"
+        else:
+            tag_str = "🏷 без тега"
         
-        history_text += f"— {date} {tag}\n  {text}\n\n"
+        text = record.get("text") or ""
+        photo_id = record.get("photo_id")
+        if text:
+            preview = text if len(text) <= 90 else text[:87] + "..."
+            if photo_id:
+                content_line = f"🖼 + ✏️ {preview}"
+            else:
+                content_line = f"✏️ {preview}"
+        else:
+            if photo_id:
+                content_line = "🖼 Фото без подписи"
+            else:
+                content_line = "—"
+        
+        entry = (
+            f"━━━━━━━━━━━━\n"
+            f"📅 {date_str} {time_str}\n"
+            f"{content_line}\n"
+            f"{tag_str}"
+        )
+        entries.append(entry)
     
-    await update.message.reply_text(history_text)
+    header = f"📜 История заметок {pet['name']}:\n"
+    # Разбиваем историю на несколько сообщений, чтобы не упереться в лимит Telegram
+    chunk = header + "\n"
+    for entry in entries:
+        if len(chunk) + len(entry) + 2 > 3500:
+            await update.message.reply_text(chunk.rstrip())
+            chunk = ""
+        chunk += entry + "\n\n"
+    if chunk.strip():
+        await update.message.reply_text(chunk.rstrip())
 
 
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -811,10 +1010,10 @@ async def handle_pet_edit_callback(update: Update, context: ContextTypes.DEFAULT
 
     elif data == "pet_edit_tz":
         keyboard = [
-            [InlineKeyboardButton("UTC+03:00 (Москва)", callback_data="pet_set_tz_+03:00")],
-            [InlineKeyboardButton("UTC+02:00 (Киев)", callback_data="pet_set_tz_+02:00")],
-            [InlineKeyboardButton("UTC+05:00 (Ташкент)", callback_data="pet_set_tz_+05:00")],
-            [InlineKeyboardButton("UTC+06:00 (Алматы)", callback_data="pet_set_tz_+06:00")],
+            [InlineKeyboardButton("UTC+03:00", callback_data="pet_set_tz_+03:00")],
+            [InlineKeyboardButton("UTC+02:00", callback_data="pet_set_tz_+02:00")],
+            [InlineKeyboardButton("UTC+05:00", callback_data="pet_set_tz_+05:00")],
+            [InlineKeyboardButton("UTC+06:00", callback_data="pet_set_tz_+06:00")],
             [InlineKeyboardButton("Другой часовой пояс...", callback_data="pet_tz_other")],
             [InlineKeyboardButton("« Назад", callback_data="pet_back")],
         ]
@@ -957,7 +1156,7 @@ async def my_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYP
         # Формируем информацию о напоминании
         day_info = ""
         if r.get("day_of_week") is not None:
-            day_info = f" · {DAYS_OF_WEEK[r['day_of_week']][:2]}"
+            day_info = f" · {DAY_ABBREV[r['day_of_week']]}"
         time_info = ""
         if r.get("time_of_day"):
             time_info = f" {r['time_of_day']}"
@@ -1067,7 +1266,7 @@ async def handle_reminder_actions_callback(update: Update, context: ContextTypes
         for r in reminders[:10]:
             day_info = ""
             if r.get("day_of_week") is not None:
-                day_info = f" · {DAYS_OF_WEEK[r['day_of_week']][:2]}"
+                day_info = f" · {DAY_ABBREV[r['day_of_week']]}"
             time_info = ""
             if r.get("time_of_day"):
                 time_info = f" {r['time_of_day']}"
@@ -1170,7 +1369,7 @@ async def handle_reminder_actions_callback(update: Update, context: ContextTypes
         days_row = []
         for i in range(7):
             day = (today + timedelta(days=i)).weekday()
-            day_name = DAYS_OF_WEEK[day][:2]
+            day_name = DAY_ABBREV[day]
             days_row.append(InlineKeyboardButton(day_name, callback_data=f"editday_week_{day}"))
             if len(days_row) == 4:
                 keyboard.append(days_row)
@@ -1331,7 +1530,7 @@ async def handle_edit_time_input(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /export — отправка PDF на расшифровку"""
+    """Команда /export — экспорт истории в PDF"""
     user_id = update.effective_user.id
     
     pet = db.get_pet(user_id)
@@ -1340,21 +1539,63 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Сначала добавь питомца!\nНапиши /start"
         )
         return
-    
-    # Проверяем, есть ли супервизоры в системе
-    supervisors = db.get_all_supervisors()
-    if not supervisors:
-        await update.message.reply_text(
-            "⚠️ Сервис расшифровки временно недоступен.\n"
-            "Попробуйте позже."
-        )
-        return
-    
-    set_user_state(user_id, STATE_WAITING_FOR_PDF, {"pet_id": pet["id"]})
+
     await update.message.reply_text(
-        "📄 Отправь PDF документ от врача.\n\n"
-        "Наш специалист расшифрует его и добавит в историю здоровья питомца."
+        "Я подготовлю PDF файл с историей заметок. Это может занять некоторое время…"
     )
+
+    # Собираем данные
+    records = db.get_all_records(pet["id"])
+    reminders = db.get_reminders_history(pet["id"], limit=50)
+
+    # Скачиваем фото питомца (если есть) для встраивания в PDF
+    pet_photo_path = None
+    photo_id = pet.get("photo_id")
+    if photo_id:
+        try:
+            file = await context.bot.get_file(photo_id)
+            pet_photo_path = f"/tmp/pet_{pet['id']}_avatar.jpg"
+            await file.download_to_drive(pet_photo_path)
+        except Exception as e:
+            logger.error(f"Не удалось скачать фото питомца для PDF: {e}")
+            pet_photo_path = None
+
+    # Генерируем PDF отчёт
+    pdf_path = generate_pdf_report(pet, records, reminders, pet_photo_path)
+
+    # Краткая сводка о питомце в чате
+    gender_map = {"м": "мальчик", "ж": "девочка"}
+    gender_txt = gender_map.get(pet.get("gender"), "не указан")
+    summary_lines = [
+        f"🐾 {pet['name']}",
+        f"Вид: {pet['type']}",
+        f"Пол: {gender_txt}",
+    ]
+    if pet.get("breed"):
+        summary_lines.append(f"Порода: {pet['breed']}")
+    if pet.get("birth_date"):
+        summary_lines.append(f"Дата рождения: {pet['birth_date']}")
+    if pet.get("weight") is not None:
+        summary_lines.append(f"Вес: {pet['weight']} кг")
+    if pet.get("vaccinations"):
+        summary_lines.append(f"Вакцинация: {pet['vaccinations']}")
+
+    notes_count = len(records)
+    summary_lines.append(f"Заметок в истории: {notes_count}")
+
+    await update.message.reply_text("📋 Краткая карта питомца:\n\n" + "\n".join(summary_lines))
+
+    # Отправляем PDF пользователю
+    try:
+        with open(pdf_path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=InputFile(f, filename=Path(pdf_path).name),
+                caption="📄 История по питомцу в формате PDF"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке PDF: {e}")
+        await update.message.reply_text("⚠️ Не удалось отправить PDF. Попробуй ещё раз позже.")
 
 
 async def handle_pdf_for_transcription(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1627,8 +1868,21 @@ async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif text == "📋 История":
         await history_command(update, context)
         return True
-    elif text == "📄 Расшифровка":
+    elif text in ("📄 Экспорт PDF", "📄 Расшифровка"):
         await export_command(update, context)
+        return True
+    elif text == "📝 Заметка":
+        pet = db.get_pet(user_id)
+        if not pet:
+            await update.message.reply_text(
+                "Сначала добавь питомца!\nНапиши /start"
+            )
+            return True
+        set_user_state(user_id, STATE_NOTE_TEXT)
+        await update.message.reply_text(
+            "✏️ Отправь текст заметки или фото с подписью.\n\n"
+            "После этого я предложу выбрать тег."
+        )
         return True
 
     return False
@@ -1695,7 +1949,7 @@ async def handle_reminders_menu_callback(update: Update, context: ContextTypes.D
         for r in reminders[:10]:
             day_info = ""
             if r.get("day_of_week") is not None:
-                day_info = f" · {DAYS_OF_WEEK[r['day_of_week']][:2]}"
+                day_info = f" · {DAY_ABBREV[r['day_of_week']]}"
             time_info = ""
             if r.get("time_of_day"):
                 time_info = f" {r['time_of_day']}"
@@ -1752,7 +2006,15 @@ async def handle_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_supervisor_transcription(update, context)
         return
 
-    if state == STATE_ONBOARDING_NAME:
+    if state in {
+        STATE_ONBOARDING_NAME,
+        STATE_ONBOARDING_GENDER,
+        STATE_ONBOARDING_BREED,
+        STATE_ONBOARDING_BIRTHDATE,
+        STATE_ONBOARDING_WEIGHT,
+        STATE_ONBOARDING_VACCINATIONS,
+        STATE_ONBOARDING_OWNER,
+    } and update.message.text:
         await handle_onboarding(update, context)
         return
 
@@ -1775,41 +2037,174 @@ async def handle_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if state == STATE_EDIT_PET_NAME:
         await handle_edit_pet_name(update, context)
         return
+    
+    if state == STATE_NOTE_TEXT:
+        # Пришёл контент заметки для явного сохранения
+        text = update.message.text or update.message.caption or ""
+        photo_id = None
+        if update.message.photo:
+            photo_id = update.message.photo[-1].file_id
+        
+        if not text and not photo_id:
+            await update.message.reply_text("Отправь текст или фото для заметки.")
+            return
+        
+        # Сохраняем временно в state и просим выбрать тег
+        set_user_state(user_id, STATE_NOTE_TEXT, {"text": text, "photo_id": photo_id})
+        
+        preview = text if text and len(text) <= 70 else (text[:67] + "...") if text else "без текста"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("💉 Вакцинация", callback_data="note_tag_вакцинация"),
+                InlineKeyboardButton("🩺 Осмотр", callback_data="note_tag_осмотр"),
+            ],
+            [
+                InlineKeyboardButton("💊 Лекарство", callback_data="note_tag_лекарство"),
+                InlineKeyboardButton("🧪 Анализы", callback_data="note_tag_анализы"),
+            ],
+            [
+                InlineKeyboardButton("🛡 Обработка", callback_data="note_tag_обработка"),
+                InlineKeyboardButton("🍽 Кормление", callback_data="note_tag_кормление"),
+            ],
+            [
+                InlineKeyboardButton("🏷 Свой тег", callback_data="note_tag_custom"),
+                InlineKeyboardButton("🚫 Без тега", callback_data="note_tag_none"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            f"Окей, сохраним заметку:\n\n«{preview}»\n\n"
+            f"Выбери тег или введи свой.",
+            reply_markup=reply_markup
+        )
+        return
 
     if state == STATE_WAITING_FOR_PDF:
         return  # PDF обрабатывается отдельно
     
-    # Проверяем, есть ли питомец
-    pet = db.get_pet(user_id)
-    if not pet:
-        set_user_state(user_id, STATE_ONBOARDING_NAME)
+    if state == STATE_NOTE_TAG and update.message.text:
+        await handle_note_custom_tag_input(update, context)
+        return
+
+    if state == STATE_ONBOARDING_PHOTO:
+        # Обработка фото питомца или пропуска
+        photo_id = None
+        if update.message.photo:
+            photo_id = update.message.photo[-1].file_id
+            db.update_pet_details(user_id, photo_id=photo_id)
+        elif update.message.text and update.message.text.strip().lower().startswith("пропус"):
+            # просто пропускаем без сохранения фото
+            pass
+        else:
+            await update.message.reply_text(
+                "Пришли фото питомца.\n\n"
+                "Чтобы пропустить пункт, напиши «Пропустить»."
+            )
+            return
+
+        set_user_state(user_id, STATE_ONBOARDING_OWNER)
         await update.message.reply_text(
-            "Привет! Давай сначала добавим питомца.\n\n"
-            "Как зовут питомца?"
+            "Как тебя зовут? Напиши своё имя (или ФИ), чтобы я знал, как к тебе обращаться.\n\n"
+            "Чтобы пропустить пункт, напиши «Пропустить»."
         )
         return
     
-    # Обрабатываем как запись
-    text = update.message.text or update.message.caption or ""
-    photo_id = None
-    
-    if update.message.photo:
-        photo_id = update.message.photo[-1].file_id
-    
-    if not text and not photo_id:
+    # В обычном режиме (когда не активен специальный flow)
+    # ничего не сохраняем автоматически, чтобы не плодить записи.
+    # Пользователь должен явно нажать кнопку «📝 Заметка».
+    return
+
+
+async def handle_note_tag_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора тега для заметки (inline-клавиатура)"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    user_data = get_user_data(user_id)
+    if not user_data:
+        await query.edit_message_text(
+            "Не нашёл текст заметки. Нажми «📝 Заметка» и начни заново."
+        )
+        clear_user_state(user_id)
         return
-    
-    # Автоматическое определение тега
-    tag = auto_detect_tag(text)
-    
-    # Сохраняем запись
+
+    pet = db.get_pet(user_id)
+    if not pet:
+        await query.edit_message_text(
+            "Сначала добавь питомца!\nНапиши /start"
+        )
+        clear_user_state(user_id)
+        return
+
+    text = user_data.get("text") or ""
+    photo_id = user_data.get("photo_id")
+
+    if data == "note_tag_custom":
+        # Переходим к вводу собственного тега
+        set_user_state(user_id, STATE_NOTE_TAG, {"text": text, "photo_id": photo_id})
+        await query.edit_message_text(
+            "Введи название тега для этой заметки.\n\n"
+            "Например: «контроль веса», «сон», «игры»."
+        )
+        return
+
+    if data == "note_tag_none":
+        tag = None
+    else:
+        tag = data.replace("note_tag_", "")
+
     db.create_record(pet["id"], text, photo_id, tag)
-    
-    response = "✅ Я сохранил запись."
-    if tag:
-        response += f"\n🏷 Тег: {tag}"
-    
-    await update.message.reply_text(response)
+    clear_user_state(user_id)
+
+    tag_text = f"🏷 #{tag}" if tag else "🏷 без тега"
+    await query.edit_message_text(
+        f"✅ Заметка сохранена.\n{tag_text}"
+    )
+
+
+async def handle_note_custom_tag_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода собственного тега пользователем"""
+    user_id = update.effective_user.id
+    state = get_user_state(user_id)
+
+    if state != STATE_NOTE_TAG:
+        return
+
+    tag = (update.message.text or "").strip()
+    if not tag:
+        await update.message.reply_text("Тег не должен быть пустым. Введи название тега.")
+        return
+
+    user_data = get_user_data(user_id)
+    if not user_data:
+        await update.message.reply_text(
+            "Не нашёл текст заметки. Нажми «📝 Заметка» и начни заново."
+        )
+        clear_user_state(user_id)
+        return
+
+    pet = db.get_pet(user_id)
+    if not pet:
+        await update.message.reply_text(
+            "Сначала добавь питомца!\nНапиши /start"
+        )
+        clear_user_state(user_id)
+        return
+
+    text = user_data.get("text") or ""
+    photo_id = user_data.get("photo_id")
+
+    db.create_record(pet["id"], text, photo_id, tag)
+    clear_user_state(user_id)
+
+    await update.message.reply_text(
+        f"✅ Заметка сохранена.\n🏷 #{tag}"
+    )
 
 
 def auto_detect_tag(text: str) -> Optional[str]:
@@ -2001,6 +2396,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_repeat_confirmation_callback(update, context)
     elif data.startswith("take_request_"):
         await handle_take_request_callback(update, context)
+    elif data.startswith("note_tag_"):
+        await handle_note_tag_callback(update, context)
 
 
 def main():

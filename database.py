@@ -37,16 +37,37 @@ class Database:
                     name TEXT NOT NULL,
                     type TEXT NOT NULL,
                     timezone TEXT DEFAULT '+03:00',
+                    gender TEXT,
+                    breed TEXT,
+                    birth_date TEXT,
+                    weight REAL,
+                    vaccinations TEXT,
+                    photo_id TEXT,
+                    owner_name TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id)
                 )
             """)
-
-            # Миграция: добавляем timezone если его нет
+         
+            # Миграции: добавляем недостающие колонки
             cursor.execute("PRAGMA table_info(pets)")
             columns = [col[1] for col in cursor.fetchall()]
             if 'timezone' not in columns:
                 cursor.execute("ALTER TABLE pets ADD COLUMN timezone TEXT DEFAULT '+03:00'")
+            if 'gender' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN gender TEXT")
+            if 'breed' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN breed TEXT")
+            if 'birth_date' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN birth_date TEXT")
+            if 'weight' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN weight REAL")
+            if 'vaccinations' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN vaccinations TEXT")
+            if 'photo_id' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN photo_id TEXT")
+            if 'owner_name' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN owner_name TEXT")
             
             # Таблица записей
             cursor.execute("""
@@ -135,7 +156,7 @@ class Database:
     # === Питомцы ===
     
     def create_pet(self, user_id: int, name: str, pet_type: str, timezone: str = '+03:00') -> int:
-        """Создать питомца"""
+        """Создать питомца (базовые поля, остальное дополняется позже)"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -170,6 +191,52 @@ class Database:
                 "UPDATE pets SET type = ? WHERE user_id = ?",
                 (pet_type, user_id)
             )
+
+    def update_pet_details(
+        self,
+        user_id: int,
+        gender: Optional[str] = None,
+        breed: Optional[str] = None,
+        birth_date: Optional[str] = None,
+        weight: Optional[float] = None,
+        vaccinations: Optional[str] = None,
+        photo_id: Optional[str] = None,
+        owner_name: Optional[str] = None,
+    ):
+        """Обновить дополнительные сведения о питомце"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            updates = []
+            params = []
+
+            if gender is not None:
+                updates.append("gender = ?")
+                params.append(gender)
+            if breed is not None:
+                updates.append("breed = ?")
+                params.append(breed)
+            if birth_date is not None:
+                updates.append("birth_date = ?")
+                params.append(birth_date)
+            if weight is not None:
+                updates.append("weight = ?")
+                params.append(weight)
+            if vaccinations is not None:
+                updates.append("vaccinations = ?")
+                params.append(vaccinations)
+            if photo_id is not None:
+                updates.append("photo_id = ?")
+                params.append(photo_id)
+            if owner_name is not None:
+                updates.append("owner_name = ?")
+                params.append(owner_name)
+
+            if updates:
+                params.append(user_id)
+                cursor.execute(
+                    f"UPDATE pets SET {', '.join(updates)} WHERE user_id = ?",
+                    params
+                )
 
     def delete_pet(self, user_id: int):
         """Удалить питомца и все связанные данные"""
@@ -234,6 +301,18 @@ class Database:
                    ORDER BY created_at DESC 
                    LIMIT ?""",
                 (pet_id, limit)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_all_records(self, pet_id: int) -> List[Dict]:
+        """Получить все записи питомца (полная история)"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT * FROM records 
+                   WHERE pet_id = ? 
+                   ORDER BY created_at DESC""",
+                (pet_id,)
             )
             return [dict(row) for row in cursor.fetchall()]
     

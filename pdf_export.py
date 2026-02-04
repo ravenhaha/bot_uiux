@@ -4,36 +4,94 @@
 
 import os
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor
 from reportlab.platypus import (
-    SimpleDocTemplate, 
-    Paragraph, 
-    Spacer, 
-    Table, 
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
     TableStyle,
-    PageBreak
+    PageBreak,
+    Image,
 )
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # Пытаемся зарегистрировать кириллический шрифт
-try:
-    # DejaVu Sans поддерживает кириллицу и обычно есть в Linux
-    pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
-    pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'))
-    FONT_NAME = 'DejaVuSans'
-    FONT_BOLD = 'DejaVuSans-Bold'
-except:
-    FONT_NAME = 'Helvetica'
-    FONT_BOLD = 'Helvetica-Bold'
+FONT_NAME = "Helvetica"
+FONT_BOLD = "Helvetica-Bold"
+
+def _init_cyrillic_font():
+    """Инициализация шрифта с поддержкой кириллицы.
+
+    Приоритет:
+    1. Путь из переменной окружения PDF_FONT_PATH
+    2. Распространённые пути DejaVu / Arial в Linux/macOS
+    3. Фоллбек на стандартный Helvetica (может не поддерживать кириллицу)
+    """
+    global FONT_NAME, FONT_BOLD
+
+    candidates = []
+
+    env_font = os.environ.get("PDF_FONT_PATH")
+    if env_font:
+        candidates.append((env_font, None))
+
+    # Linux (наш Docker)
+    candidates.append(
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        )
+    )
+
+    # Возможные пути на macOS
+    candidates.append(
+        (
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            None,
+        )
+    )
+    candidates.append(
+        (
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        )
+    )
+
+    for regular_path, bold_path in candidates:
+        try:
+            if not os.path.exists(regular_path):
+                continue
+
+            pdfmetrics.registerFont(TTFont("CustomCyrillic", regular_path))
+            FONT_NAME = "CustomCyrillic"
+
+            if bold_path and os.path.exists(bold_path):
+                pdfmetrics.registerFont(TTFont("CustomCyrillic-Bold", bold_path))
+                FONT_BOLD = "CustomCyrillic-Bold"
+            else:
+                FONT_BOLD = FONT_NAME
+
+            return
+        except Exception:
+            continue
 
 
-def generate_pdf_report(pet: Dict, records: List[Dict], reminders: List[Dict]) -> str:
+_init_cyrillic_font()
+
+
+def generate_pdf_report(
+    pet: Dict,
+    records: List[Dict],
+    reminders: List[Dict],
+    pet_photo_path: Optional[str] = None,
+) -> str:
     """
     Генерация PDF отчёта для врача
     
@@ -107,13 +165,54 @@ def generate_pdf_report(pet: Dict, records: List[Dict], reminders: List[Dict]) -
         f"История здоровья: {pet['name']}", 
         title_style
     ))
+
+    # Фото питомца (если есть)
+    if pet_photo_path and os.path.exists(pet_photo_path):
+        try:
+            img = Image(pet_photo_path, width=40 * mm, height=40 * mm)
+            img.hAlign = "RIGHT"
+            story.append(img)
+            story.append(Spacer(1, 5 * mm))
+        except Exception:
+            # Если по какой-то причине изображение не вставилось — просто пропускаем
+            pass
     
     # Информация о питомце
+    pet_type = pet.get("type", "")
     story.append(Paragraph(
-        f"Тип: {pet['type']}",
+        f"Тип: {pet_type}",
         normal_style
     ))
-    
+
+    # Дополнительные данные из анкеты
+    details_lines = []
+
+    gender_map = {"м": "мальчик", "ж": "девочка"}
+    gender_raw = pet.get("gender")
+    if gender_raw:
+        details_lines.append(f"Пол: {gender_map.get(gender_raw, gender_raw)}")
+
+    if pet.get("breed"):
+        details_lines.append(f"Порода: {pet['breed']}")
+
+    if pet.get("birth_date"):
+        details_lines.append(f"Дата рождения: {pet['birth_date']}")
+
+    if pet.get("weight") is not None:
+        details_lines.append(f"Вес: {pet['weight']} кг")
+
+    if pet.get("vaccinations"):
+        details_lines.append(f"Вакцинация: {pet['vaccinations']}")
+
+    if pet.get("owner_name"):
+        details_lines.append(f"Владелец: {pet['owner_name']}")
+
+    if details_lines:
+        story.append(Paragraph(
+            "<br/>".join(details_lines),
+            normal_style
+        ))
+
     report_date = datetime.now().strftime("%d.%m.%Y")
     story.append(Paragraph(
         f"Дата отчёта: {report_date}",
