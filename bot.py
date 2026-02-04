@@ -5,11 +5,11 @@ Telegram бот для отслеживания здоровья питомце�
 import os
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from pathlib import Path
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, InputFile
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -18,6 +18,15 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+
+def get_main_menu_keyboard():
+    """Главное меню с кнопками"""
+    keyboard = [
+        [KeyboardButton("🐾 Мой питомец"), KeyboardButton("🔔 Напоминания")],
+        [KeyboardButton("📋 История"), KeyboardButton("📄 Расшифровка")],
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 from database import Database
 from pdf_export import generate_pdf_report
@@ -38,11 +47,97 @@ USER_STATES = {}
 # Константы состояний
 STATE_ONBOARDING_NAME = "onboarding_name"
 STATE_ONBOARDING_TYPE = "onboarding_type"
+STATE_ONBOARDING_TIMEZONE = "onboarding_timezone"
 STATE_REMINDER_TEXT = "reminder_text"
+STATE_REMINDER_DAY = "reminder_day"
 STATE_REMINDER_TIME = "reminder_time"
+STATE_REMINDER_RECURRING = "reminder_recurring"
+STATE_EDIT_REMINDER_TEXT = "edit_reminder_text"
+STATE_EDIT_REMINDER_DAY = "edit_reminder_day"
+STATE_EDIT_REMINDER_TIME = "edit_reminder_time"
+STATE_EDIT_PET_NAME = "edit_pet_name"
 STATE_WAITING_FOR_PDF = "waiting_for_pdf"
 STATE_SUPERVISOR_TRANSCRIPTION = "supervisor_transcription"
 STATE_NORMAL = "normal"
+
+# Серверный часовой пояс (Москва)
+SERVER_TIMEZONE = "+03:00"
+
+
+def parse_timezone_offset(tz_str: str) -> int:
+    """Парсит строку часового пояса в минуты смещения от UTC"""
+    # Формат: +03:00 или -05:30
+    sign = 1 if tz_str[0] == '+' else -1
+    parts = tz_str[1:].split(':')
+    hours = int(parts[0])
+    minutes = int(parts[1]) if len(parts) > 1 else 0
+    return sign * (hours * 60 + minutes)
+
+
+def convert_user_time_to_server(user_time: datetime, user_tz: str) -> datetime:
+    """Конвертирует время пользователя в серверное (МСК)"""
+    user_offset = parse_timezone_offset(user_tz)
+    server_offset = parse_timezone_offset(SERVER_TIMEZONE)
+
+    # Разница в минутах между часовыми поясами
+    diff_minutes = user_offset - server_offset
+
+    # Если пользователь впереди сервера, вычитаем разницу
+    # Если позади - прибавляем
+    server_time = user_time - timedelta(minutes=diff_minutes)
+    return server_time
+
+
+def convert_server_time_to_user(server_time: datetime, user_tz: str) -> datetime:
+    """Конвертирует серверное время в время пользователя"""
+    user_offset = parse_timezone_offset(user_tz)
+    server_offset = parse_timezone_offset(SERVER_TIMEZONE)
+
+    diff_minutes = user_offset - server_offset
+    user_time = server_time + timedelta(minutes=diff_minutes)
+    return user_time
+
+
+# Дни недели
+DAYS_OF_WEEK = {
+    0: "Понедельник",
+    1: "Вторник",
+    2: "Среда",
+    3: "Четверг",
+    4: "Пятница",
+    5: "Суббота",
+    6: "Воскресенье"
+}
+
+# Часовые пояса (популярные)
+TIMEZONES = [
+    ("-12:00", "UTC-12:00"),
+    ("-11:00", "UTC-11:00"),
+    ("-10:00", "UTC-10:00 (Гавайи)"),
+    ("-09:00", "UTC-09:00 (Аляска)"),
+    ("-08:00", "UTC-08:00 (Лос-Анджелес)"),
+    ("-07:00", "UTC-07:00 (Денвер)"),
+    ("-06:00", "UTC-06:00 (Чикаго)"),
+    ("-05:00", "UTC-05:00 (Нью-Йорк)"),
+    ("-04:00", "UTC-04:00"),
+    ("-03:00", "UTC-03:00"),
+    ("-02:00", "UTC-02:00"),
+    ("-01:00", "UTC-01:00"),
+    ("+00:00", "UTC+00:00 (Лондон)"),
+    ("+01:00", "UTC+01:00 (Берлин)"),
+    ("+02:00", "UTC+02:00 (Киев)"),
+    ("+03:00", "UTC+03:00 (Москва)"),
+    ("+04:00", "UTC+04:00 (Дубай)"),
+    ("+05:00", "UTC+05:00 (Ташкент)"),
+    ("+05:30", "UTC+05:30 (Дели)"),
+    ("+06:00", "UTC+06:00 (Алматы)"),
+    ("+07:00", "UTC+07:00 (Бангкок)"),
+    ("+08:00", "UTC+08:00 (Пекин)"),
+    ("+09:00", "UTC+09:00 (Токио)"),
+    ("+10:00", "UTC+10:00 (Сидней)"),
+    ("+11:00", "UTC+11:00"),
+    ("+12:00", "UTC+12:00"),
+]
 
 
 def get_user_state(user_id: int) -> str:
@@ -88,14 +183,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pet = db.get_pet(user_id)
     
     if pet:
+        tz_info = f"\nЧасовой пояс: UTC{pet.get('timezone', '+03:00')}" if pet.get('timezone') else ""
         await update.message.reply_text(
             f"С возвращением! 🐾\n\n"
-            f"Твой питомец: {pet['name']} ({pet['type']})\n\n"
-            f"Ты можешь:\n"
-            f"— присылать фото и заметки\n"
-            f"— /reminder — создать напоминание\n"
-            f"— /history — посмотреть историю\n"
-            f"— /export — отправить PDF от врача на расшифровку"
+            f"Твой питомец: {pet['name']} ({pet['type']}){tz_info}\n\n"
+            f"Ты можешь присылать фото и заметки о питомце.\n"
+            f"Используй меню внизу для навигации.",
+            reply_markup=get_main_menu_keyboard()
         )
     else:
         set_user_state(user_id, STATE_ONBOARDING_NAME)
@@ -139,29 +233,92 @@ async def handle_pet_type_callback(update: Update, context: ContextTypes.DEFAULT
     """Обработка выбора типа питомца"""
     query = update.callback_query
     await query.answer()
-    
+
     user_id = query.from_user.id
     pet_type = query.data.replace("pet_type_", "")
     user_data = get_user_data(user_id)
-    
+
     if not user_data or "name" not in user_data:
         await query.edit_message_text("Что-то пошло не так. Напиши /start чтобы начать заново.")
         return
-    
+
+    # Сохраняем тип, переходим к выбору часового пояса
+    user_data["type"] = pet_type
+    set_user_state(user_id, STATE_ONBOARDING_TIMEZONE, user_data)
+
+    # Показываем популярные часовые пояса
+    keyboard = [
+        [InlineKeyboardButton("UTC+03:00 (Москва)", callback_data="tz_+03:00")],
+        [InlineKeyboardButton("UTC+02:00 (Киев)", callback_data="tz_+02:00")],
+        [InlineKeyboardButton("UTC+05:00 (Ташкент)", callback_data="tz_+05:00")],
+        [InlineKeyboardButton("UTC+06:00 (Алматы)", callback_data="tz_+06:00")],
+        [InlineKeyboardButton("Другой часовой пояс...", callback_data="tz_other")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        "Укажи свой часовой пояс для корректных напоминаний.\n\n"
+        "Часовой пояс указывается в формате смещения от UTC (Гринвича).\n"
+        "Например: UTC+03:00 — это московское время.\n\n"
+        "Выбери свой часовой пояс:",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_timezone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора часового пояса"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "tz_other":
+        # Показываем полный список
+        keyboard = []
+        row = []
+        for tz_offset, tz_name in TIMEZONES:
+            row.append(InlineKeyboardButton(tz_name, callback_data=f"tz_{tz_offset}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "Выбери свой часовой пояс:",
+            reply_markup=reply_markup
+        )
+        return
+
+    # Извлекаем часовой пояс
+    timezone = data.replace("tz_", "")
+    user_data = get_user_data(user_id)
+
+    if not user_data or "name" not in user_data or "type" not in user_data:
+        await query.edit_message_text("Что-то пошло не так. Напиши /start чтобы начать заново.")
+        return
+
     pet_name = user_data["name"]
-    
-    # Создаём питомца
-    db.create_pet(user_id, pet_name, pet_type)
+    pet_type = user_data["type"]
+
+    # Создаём питомца с часовым поясом
+    db.create_pet(user_id, pet_name, pet_type, timezone)
     clear_user_state(user_id)
-    
+
     await query.edit_message_text(
         f"Готово! 🎉\n\n"
-        f"{pet_name} добавлен.\n\n"
-        f"Ты можешь:\n"
-        f"— присылать фото и заметки\n"
-        f"— /reminder — создать напоминание\n"
-        f"— /history — посмотреть историю\n"
-        f"— /export — отправить PDF от врача на расшифровку"
+        f"{pet_name} добавлен.\n"
+        f"Часовой пояс: UTC{timezone}\n\n"
+        f"Ты можешь присылать фото и заметки о питомце."
+    )
+
+    # Отправляем отдельное сообщение с меню
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="Используй меню внизу для навигации 👇",
+        reply_markup=get_main_menu_keyboard()
     )
 
 
@@ -185,54 +342,198 @@ async def handle_reminder_flow(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     state = get_user_state(user_id)
     text = update.message.text.strip()
-    
+
     if state == STATE_REMINDER_TEXT:
-        set_user_state(user_id, STATE_REMINDER_TIME, {"text": text})
-        
+        set_user_state(user_id, STATE_REMINDER_DAY, {"text": text})
+
+        # Выбор дня
+        from datetime import timedelta
+        today = datetime.now()
+
         keyboard = [
             [
-                InlineKeyboardButton("Через 1 час", callback_data="remind_1h"),
-                InlineKeyboardButton("Через 3 часа", callback_data="remind_3h"),
+                InlineKeyboardButton("Сегодня", callback_data="day_today"),
+                InlineKeyboardButton("Завтра", callback_data="day_tomorrow"),
             ],
             [
-                InlineKeyboardButton("Завтра утром", callback_data="remind_tomorrow_morning"),
-                InlineKeyboardButton("Завтра вечером", callback_data="remind_tomorrow_evening"),
+                InlineKeyboardButton("Через 1 час", callback_data="day_quick_1h"),
+                InlineKeyboardButton("Через 3 часа", callback_data="day_quick_3h"),
             ],
-            [
-                InlineKeyboardButton("Через неделю", callback_data="remind_1w"),
-            ]
         ]
+
+        # Добавляем дни недели
+        days_row = []
+        for i in range(7):
+            day = (today + timedelta(days=i)).weekday()
+            day_name = DAYS_OF_WEEK[day][:2]  # Сокращённое название
+            days_row.append(InlineKeyboardButton(day_name, callback_data=f"day_week_{day}"))
+            if len(days_row) == 4:
+                keyboard.append(days_row)
+                days_row = []
+        if days_row:
+            keyboard.append(days_row)
+
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
         await update.message.reply_text(
-            "Когда напомнить?",
+            "Когда напомнить?\n\n"
+            "Выбери день или быстрый вариант:",
             reply_markup=reply_markup
         )
         return True
-    
+
     return False
 
 
-async def handle_reminder_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора времени напоминания"""
+async def handle_reminder_day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора дня для напоминания"""
     query = update.callback_query
     await query.answer()
-    
+
     user_id = query.from_user.id
-    time_choice = query.data.replace("remind_", "")
+    data = query.data
     user_data = get_user_data(user_id)
-    
+
     if not user_data or "text" not in user_data:
         await query.edit_message_text("Что-то пошло не так. Напиши /reminder чтобы начать заново.")
         return
-    
-    reminder_text = user_data["text"]
-    pet = db.get_pet(user_id)
-    
-    # Вычисляем время напоминания
+
     from datetime import timedelta
     now = datetime.now()
-    
+    pet = db.get_pet(user_id)
+
+    user_tz = pet.get("timezone", "+03:00")
+
+    # Быстрые варианты (сразу создаём напоминание)
+    # Время "через X часов" не зависит от часового пояса - просто добавляем к текущему
+    if data == "day_quick_1h":
+        remind_at = now + timedelta(hours=1)
+        # Показываем пользователю время в его часовом поясе
+        user_time = convert_server_time_to_user(remind_at, user_tz)
+        db.create_reminder(user_id, pet["id"], user_data["text"], remind_at)
+        clear_user_state(user_id)
+        await query.edit_message_text(
+            f"✅ Напоминание создано!\n\n"
+            f"📝 {user_data['text']}\n"
+            f"⏰ {user_time.strftime('%d.%m в %H:%M')}"
+        )
+        return
+
+    if data == "day_quick_3h":
+        remind_at = now + timedelta(hours=3)
+        user_time = convert_server_time_to_user(remind_at, user_tz)
+        db.create_reminder(user_id, pet["id"], user_data["text"], remind_at)
+        clear_user_state(user_id)
+        await query.edit_message_text(
+            f"✅ Напоминание создано!\n\n"
+            f"📝 {user_data['text']}\n"
+            f"⏰ {user_time.strftime('%d.%m в %H:%M')}"
+        )
+        return
+
+    # Определяем выбранный день
+    if data == "day_today":
+        user_data["day"] = now.weekday()
+        user_data["date"] = now.date().isoformat()
+    elif data == "day_tomorrow":
+        tomorrow = now + timedelta(days=1)
+        user_data["day"] = tomorrow.weekday()
+        user_data["date"] = tomorrow.date().isoformat()
+    elif data.startswith("day_week_"):
+        day_of_week = int(data.replace("day_week_", ""))
+        user_data["day"] = day_of_week
+        # Находим ближайший такой день
+        days_ahead = day_of_week - now.weekday()
+        if days_ahead < 0:
+            days_ahead += 7
+        target_date = now + timedelta(days=days_ahead)
+        user_data["date"] = target_date.date().isoformat()
+
+    set_user_state(user_id, STATE_REMINDER_TIME, user_data)
+
+    day_name = DAYS_OF_WEEK[user_data["day"]]
+    await query.edit_message_text(
+        f"День: {day_name}\n\n"
+        f"Введи время в формате ЧЧ:ММ\n"
+        f"Например: 09:30 или 14:00"
+    )
+
+
+async def handle_reminder_time_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода времени напоминания пользователем"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    user_data = get_user_data(user_id)
+
+    if not user_data or "text" not in user_data or "date" not in user_data:
+        await update.message.reply_text("Что-то пошло не так. Напиши /reminder чтобы начать заново.")
+        clear_user_state(user_id)
+        return
+
+    # Проверяем формат времени
+    import re
+    time_match = re.match(r'^(\d{1,2}):(\d{2})$', text)
+    if not time_match:
+        await update.message.reply_text(
+            "Неверный формат времени.\n\n"
+            "Введи время в формате ЧЧ:ММ\n"
+            "Например: 09:30 или 14:00"
+        )
+        return
+
+    hours = int(time_match.group(1))
+    minutes = int(time_match.group(2))
+
+    if hours < 0 or hours > 23 or minutes < 0 or minutes > 59:
+        await update.message.reply_text(
+            "Некорректное время.\n\n"
+            "Часы: 00-23, минуты: 00-59\n"
+            "Например: 09:30 или 14:00"
+        )
+        return
+
+    time_str = f"{hours:02d}:{minutes:02d}"
+    user_data["time"] = time_str
+    set_user_state(user_id, STATE_REMINDER_RECURRING, user_data)
+
+    # Спрашиваем о повторении
+    keyboard = [
+        [InlineKeyboardButton("Одноразово", callback_data="recurring_no")],
+        [InlineKeyboardButton("Каждый день", callback_data="recurring_daily")],
+        [InlineKeyboardButton("Каждую неделю", callback_data="recurring_weekly")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    day_name = DAYS_OF_WEEK[user_data["day"]]
+    await update.message.reply_text(
+        f"День: {day_name}\n"
+        f"Время: {time_str}\n\n"
+        f"Как часто напоминать?",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_reminder_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора времени напоминания (для обратной совместимости)"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+    user_data = get_user_data(user_id)
+
+    if not user_data or "text" not in user_data:
+        await query.edit_message_text("Что-то пошло не так. Напиши /reminder чтобы начать заново.")
+        return
+
+    # Старый формат для обратной совместимости
+    time_choice = data.replace("remind_", "")
+    reminder_text = user_data["text"]
+    pet = db.get_pet(user_id)
+
+    from datetime import timedelta
+    now = datetime.now()
+
     time_deltas = {
         "1h": timedelta(hours=1),
         "3h": timedelta(hours=3),
@@ -240,15 +541,14 @@ async def handle_reminder_time_callback(update: Update, context: ContextTypes.DE
         "tomorrow_evening": timedelta(days=1, hours=19 - now.hour),
         "1w": timedelta(weeks=1),
     }
-    
+
     remind_at = now + time_deltas.get(time_choice, timedelta(hours=1))
-    
-    # Создаём напоминание
+
     db.create_reminder(user_id, pet["id"], reminder_text, remind_at)
     clear_user_state(user_id)
-    
+
     time_str = remind_at.strftime("%d.%m в %H:%M")
-    
+
     await query.edit_message_text(
         f"✅ Напоминание создано!\n\n"
         f"📝 {reminder_text}\n"
@@ -256,21 +556,125 @@ async def handle_reminder_time_callback(update: Update, context: ContextTypes.DE
     )
 
 
+async def handle_recurring_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора повторения напоминания"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+    user_data = get_user_data(user_id)
+
+    if not user_data or "text" not in user_data or "date" not in user_data or "time" not in user_data:
+        await query.edit_message_text("Что-то пошло не так. Используй меню 🔔 Напоминания.")
+        return
+
+    is_recurring = data == "recurring_weekly"
+    is_daily = data == "recurring_daily"
+    pet = db.get_pet(user_id)
+    user_tz = pet.get("timezone", "+03:00")
+
+    # Собираем дату и время пользователя
+    date_parts = user_data["date"].split("-")
+    time_parts = user_data["time"].split(":")
+
+    user_remind_at = datetime(
+        int(date_parts[0]), int(date_parts[1]), int(date_parts[2]),
+        int(time_parts[0]), int(time_parts[1])
+    )
+
+    # Конвертируем в серверное время (МСК)
+    server_remind_at = convert_user_time_to_server(user_remind_at, user_tz)
+
+    # Создаём напоминание
+    db.create_reminder(
+        user_id=user_id,
+        pet_id=pet["id"],
+        text=user_data["text"],
+        remind_at=server_remind_at,
+        day_of_week=user_data["day"],
+        time_of_day=user_data["time"],
+        is_recurring=is_recurring,
+        is_daily=is_daily
+    )
+    clear_user_state(user_id)
+
+    day_name = DAYS_OF_WEEK[user_data["day"]]
+
+    if is_daily:
+        recurring_text = "\n🔄 Повторяется каждый день"
+    elif is_recurring:
+        recurring_text = "\n🔄 Повторяется каждую неделю"
+    else:
+        recurring_text = ""
+
+    await query.edit_message_text(
+        f"✅ Напоминание создано!\n\n"
+        f"📝 {user_data['text']}\n"
+        f"📅 {day_name}\n"
+        f"⏰ {user_data['time']}{recurring_text}"
+    )
+
+
 async def handle_reminder_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка действий с напоминанием (выполнено/пропущено)"""
     query = update.callback_query
     await query.answer()
-    
+
     data = query.data
     parts = data.split("_")
     action = parts[1]  # done или skip
     reminder_id = int(parts[2])
-    
+
     status = "выполнено" if action == "done" else "пропущено"
     db.update_reminder_status(reminder_id, status)
-    
+
+    # Проверяем, повторяющееся ли это напоминание
+    reminder = db.get_reminder_by_id(reminder_id)
     emoji = "👍" if action == "done" else "⏭"
-    await query.edit_message_text(f"Отметил {emoji}")
+
+    if reminder and reminder.get("is_daily") and reminder.get("is_active", 1):
+        # Для ежедневного напоминания автоматически сбрасываем на завтра
+        time_of_day = reminder.get("time_of_day", "12:00")
+        pet = db.get_pet_by_id(reminder["pet_id"])
+        user_tz = pet.get("timezone", "+03:00") if pet else "+03:00"
+
+        tomorrow = datetime.now() + timedelta(days=1)
+        time_parts = time_of_day.split(":")
+
+        user_remind_at = datetime(
+            tomorrow.year, tomorrow.month, tomorrow.day,
+            int(time_parts[0]), int(time_parts[1])
+        )
+        server_remind_at = convert_user_time_to_server(user_remind_at, user_tz)
+
+        db.reset_reminder_for_next_week(reminder_id, server_remind_at)
+
+        await query.edit_message_text(
+            f"{emoji} Отмечено как {status}!\n\n"
+            f"📅 Напоминание повторится завтра в {time_of_day}"
+        )
+
+    elif reminder and reminder.get("is_recurring") and reminder.get("is_active", 1):
+        # Для еженедельного напоминания показываем запрос
+        day_name = DAYS_OF_WEEK.get(reminder.get("day_of_week"), "")
+        time_str = reminder.get("time_of_day", "")
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, повторить", callback_data=f"repeat_yes_{reminder_id}")],
+            [InlineKeyboardButton("❌ Отменить повторение", callback_data=f"repeat_no_{reminder_id}")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"{emoji} Отмечено как {status}!\n\n"
+            f"🔄 Это еженедельное напоминание.\n"
+            f"📅 {day_name} {time_str}\n\n"
+            f"Повторить на следующей неделе?",
+            reply_markup=reply_markup
+        )
+    else:
+        await query.edit_message_text(f"Отметил {emoji}")
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -308,30 +712,622 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /reminders — история напоминаний"""
     user_id = update.effective_user.id
-    
+
     pet = db.get_pet(user_id)
     if not pet:
         await update.message.reply_text(
             "Сначала добавь питомца!\nНапиши /start"
         )
         return
-    
+
     reminders = db.get_reminders_history(pet["id"], limit=10)
-    
+
     if not reminders:
         await update.message.reply_text(
             f"У {pet['name']} пока нет напоминаний.\n"
             f"Создай первое: /reminder"
         )
         return
-    
+
     text = f"🔔 Напоминания {pet['name']}:\n\n"
-    
+
     for r in reminders:
         status_emoji = "✅" if r["status"] == "выполнено" else "⏭" if r["status"] == "пропущено" else "⏳"
         text += f"— {r['text']} · {status_emoji} {r['status']}\n"
-    
+
     await update.message.reply_text(text)
+
+
+async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /profile — управление карточкой питомца"""
+    user_id = update.effective_user.id
+
+    pet = db.get_pet(user_id)
+    if not pet:
+        await update.message.reply_text(
+            "У тебя пока нет питомца.\n"
+            "Напиши /start чтобы добавить."
+        )
+        return
+
+    tz = pet.get('timezone', '+03:00')
+
+    keyboard = [
+        [InlineKeyboardButton("✏️ Изменить имя", callback_data="pet_edit_name")],
+        [InlineKeyboardButton("🐾 Изменить тип", callback_data="pet_edit_type")],
+        [InlineKeyboardButton("🕐 Изменить часовой пояс", callback_data="pet_edit_tz")],
+        [InlineKeyboardButton("🗑 Удалить карточку", callback_data="pet_delete")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"🐾 Карточка питомца\n\n"
+        f"Имя: {pet['name']}\n"
+        f"Тип: {pet['type']}\n"
+        f"Часовой пояс: UTC{tz}\n\n"
+        f"Выбери действие:",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_pet_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка редактирования карточки питомца"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    pet = db.get_pet(user_id)
+    if not pet:
+        await query.edit_message_text("Питомец не найден. Напиши /start")
+        return
+
+    if data == "pet_edit_name":
+        set_user_state(user_id, STATE_EDIT_PET_NAME)
+        await query.edit_message_text(
+            f"Текущее имя: {pet['name']}\n\n"
+            f"Введи новое имя питомца:"
+        )
+
+    elif data == "pet_edit_type":
+        keyboard = [
+            [
+                InlineKeyboardButton("🐱 Кошка", callback_data="pet_set_type_кошка"),
+                InlineKeyboardButton("🐶 Собака", callback_data="pet_set_type_собака"),
+            ],
+            [
+                InlineKeyboardButton("🐹 Другое", callback_data="pet_set_type_другое"),
+            ],
+            [InlineKeyboardButton("« Назад", callback_data="pet_back")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"Текущий тип: {pet['type']}\n\n"
+            f"Выбери новый тип:",
+            reply_markup=reply_markup
+        )
+
+    elif data == "pet_edit_tz":
+        keyboard = [
+            [InlineKeyboardButton("UTC+03:00 (Москва)", callback_data="pet_set_tz_+03:00")],
+            [InlineKeyboardButton("UTC+02:00 (Киев)", callback_data="pet_set_tz_+02:00")],
+            [InlineKeyboardButton("UTC+05:00 (Ташкент)", callback_data="pet_set_tz_+05:00")],
+            [InlineKeyboardButton("UTC+06:00 (Алматы)", callback_data="pet_set_tz_+06:00")],
+            [InlineKeyboardButton("Другой часовой пояс...", callback_data="pet_tz_other")],
+            [InlineKeyboardButton("« Назад", callback_data="pet_back")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        tz = pet.get('timezone', '+03:00')
+        await query.edit_message_text(
+            f"Текущий часовой пояс: UTC{tz}\n\n"
+            f"Выбери новый:",
+            reply_markup=reply_markup
+        )
+
+    elif data == "pet_delete":
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, удалить", callback_data="pet_confirm_delete"),
+                InlineKeyboardButton("❌ Отмена", callback_data="pet_back"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"⚠️ Удалить карточку питомца?\n\n"
+            f"Будут удалены:\n"
+            f"— Все записи о {pet['name']}\n"
+            f"— Все напоминания\n"
+            f"— История расшифровок\n\n"
+            f"Это действие нельзя отменить!",
+            reply_markup=reply_markup
+        )
+
+    elif data == "pet_confirm_delete":
+        pet_name = pet['name']
+        db.delete_pet(user_id)
+        clear_user_state(user_id)
+
+        await query.edit_message_text(
+            f"🗑 Карточка {pet_name} удалена.\n\n"
+            f"Чтобы добавить нового питомца, напиши /start"
+        )
+
+    elif data == "pet_back":
+        tz = pet.get('timezone', '+03:00')
+        keyboard = [
+            [InlineKeyboardButton("✏️ Изменить имя", callback_data="pet_edit_name")],
+            [InlineKeyboardButton("🐾 Изменить тип", callback_data="pet_edit_type")],
+            [InlineKeyboardButton("🕐 Изменить часовой пояс", callback_data="pet_edit_tz")],
+            [InlineKeyboardButton("🗑 Удалить карточку", callback_data="pet_delete")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            f"🐾 Карточка питомца\n\n"
+            f"Имя: {pet['name']}\n"
+            f"Тип: {pet['type']}\n"
+            f"Часовой пояс: UTC{tz}\n\n"
+            f"Выбери действие:",
+            reply_markup=reply_markup
+        )
+
+    elif data.startswith("pet_set_type_"):
+        new_type = data.replace("pet_set_type_", "")
+        db.update_pet_type(user_id, new_type)
+
+        await query.edit_message_text(
+            f"✅ Тип питомца изменён на: {new_type}\n\n"
+            f"Управление карточкой: /profile"
+        )
+
+    elif data.startswith("pet_set_tz_"):
+        new_tz = data.replace("pet_set_tz_", "")
+        db.update_pet_timezone(user_id, new_tz)
+
+        await query.edit_message_text(
+            f"✅ Часовой пояс изменён на: UTC{new_tz}\n\n"
+            f"Управление карточкой: /profile"
+        )
+
+    elif data == "pet_tz_other":
+        keyboard = []
+        row = []
+        for tz_offset, tz_name in TIMEZONES:
+            row.append(InlineKeyboardButton(tz_name, callback_data=f"pet_set_tz_{tz_offset}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("« Назад", callback_data="pet_edit_tz")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "Выбери часовой пояс:",
+            reply_markup=reply_markup
+        )
+
+
+async def handle_edit_pet_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка редактирования имени питомца"""
+    user_id = update.effective_user.id
+    new_name = update.message.text.strip()
+
+    if len(new_name) > 50:
+        await update.message.reply_text("Имя слишком длинное. Максимум 50 символов.")
+        return
+
+    db.update_pet_name(user_id, new_name)
+    clear_user_state(user_id)
+
+    await update.message.reply_text(
+        f"✅ Имя питомца изменено на: {new_name}\n\n"
+        f"Управление карточкой: /profile"
+    )
+
+
+async def my_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /my_reminders — управление напоминаниями"""
+    user_id = update.effective_user.id
+
+    pet = db.get_pet(user_id)
+    if not pet:
+        await update.message.reply_text(
+            "Сначала добавь питомца!\nНапиши /start"
+        )
+        return
+
+    reminders = db.get_all_user_reminders(user_id)
+
+    if not reminders:
+        await update.message.reply_text(
+            f"У тебя нет активных напоминаний.\n"
+            f"Создай первое: /reminder"
+        )
+        return
+
+    text = f"🔔 Твои напоминания:\n\n"
+
+    keyboard = []
+    for r in reminders[:10]:
+        # Формируем информацию о напоминании
+        day_info = ""
+        if r.get("day_of_week") is not None:
+            day_info = f" · {DAYS_OF_WEEK[r['day_of_week']][:2]}"
+        time_info = ""
+        if r.get("time_of_day"):
+            time_info = f" {r['time_of_day']}"
+
+        recurring_icon = "🔄" if r.get("is_recurring") else ""
+        active_icon = "" if r.get("is_active", 1) else "⏸"
+
+        text += f"{active_icon}{recurring_icon} {r['text'][:30]}{day_info}{time_info}\n"
+
+        keyboard.append([
+            InlineKeyboardButton(f"⚙️ #{r['id']}: {r['text'][:15]}...", callback_data=f"manage_{r['id']}")
+        ])
+
+    keyboard.append([InlineKeyboardButton("➕ Новое напоминание", callback_data="new_reminder")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(text, reply_markup=reply_markup)
+
+
+async def handle_manage_reminder_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка управления конкретным напоминанием"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "new_reminder":
+        # Начинаем создание нового напоминания
+        set_user_state(user_id, STATE_REMINDER_TEXT)
+        await query.edit_message_text("Что нужно напомнить?")
+        return
+
+    if data.startswith("manage_"):
+        reminder_id = int(data.replace("manage_", ""))
+        reminder = db.get_reminder_by_id(reminder_id)
+
+        if not reminder or reminder["user_id"] != user_id:
+            await query.edit_message_text("Напоминание не найдено.")
+            return
+
+        # Показываем детали и действия
+        day_info = ""
+        if reminder.get("day_of_week") is not None:
+            day_info = f"\n📅 {DAYS_OF_WEEK[reminder['day_of_week']]}"
+        time_info = ""
+        if reminder.get("time_of_day"):
+            time_info = f"\n⏰ {reminder['time_of_day']}"
+
+        recurring_info = ""
+        if reminder.get("is_daily"):
+            recurring_info = "\n📅 Повторяется каждый день"
+        elif reminder.get("is_recurring"):
+            recurring_info = "\n🔄 Повторяется каждую неделю"
+
+        active_info = ""
+        if not reminder.get("is_active", 1):
+            active_info = "\n⏸ Приостановлено"
+
+        text = (
+            f"📝 {reminder['text']}"
+            f"{day_info}{time_info}{recurring_info}{active_info}\n\n"
+            f"Выбери действие:"
+        )
+
+        keyboard = [
+            [InlineKeyboardButton("✏️ Изменить текст", callback_data=f"edit_text_{reminder_id}")],
+            [InlineKeyboardButton("📅 Изменить день/время", callback_data=f"edit_time_{reminder_id}")],
+        ]
+
+        # Кнопка включения/отключения
+        if reminder.get("is_active", 1):
+            keyboard.append([InlineKeyboardButton("⏸ Приостановить", callback_data=f"pause_{reminder_id}")])
+        else:
+            keyboard.append([InlineKeyboardButton("▶️ Возобновить", callback_data=f"resume_{reminder_id}")])
+
+        # Кнопка управления повторением
+        if reminder.get("is_recurring"):
+            keyboard.append([InlineKeyboardButton("🔄 Отключить повторение", callback_data=f"no_recur_{reminder_id}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🔄 Включить повторение", callback_data=f"yes_recur_{reminder_id}")])
+
+        keyboard.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"delete_{reminder_id}")])
+        keyboard.append([InlineKeyboardButton("« Назад", callback_data="back_to_list")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, reply_markup=reply_markup)
+
+
+async def handle_reminder_actions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка действий над напоминаниями"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "back_to_list":
+        # Возвращаемся к списку
+        reminders = db.get_all_user_reminders(user_id)
+        if not reminders:
+            await query.edit_message_text("У тебя нет активных напоминаний.")
+            return
+
+        text = f"🔔 Твои напоминания:\n\n"
+        keyboard = []
+        for r in reminders[:10]:
+            day_info = ""
+            if r.get("day_of_week") is not None:
+                day_info = f" · {DAYS_OF_WEEK[r['day_of_week']][:2]}"
+            time_info = ""
+            if r.get("time_of_day"):
+                time_info = f" {r['time_of_day']}"
+
+            recurring_icon = "🔄" if r.get("is_recurring") else ""
+            active_icon = "" if r.get("is_active", 1) else "⏸"
+
+            text += f"{active_icon}{recurring_icon} {r['text'][:30]}{day_info}{time_info}\n"
+            keyboard.append([
+                InlineKeyboardButton(f"⚙️ #{r['id']}: {r['text'][:15]}...", callback_data=f"manage_{r['id']}")
+            ])
+
+        keyboard.append([InlineKeyboardButton("➕ Новое напоминание", callback_data="new_reminder")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, reply_markup=reply_markup)
+        return
+
+    # Извлекаем ID напоминания
+    parts = data.split("_")
+    action = parts[0]
+    reminder_id = int(parts[-1])
+
+    reminder = db.get_reminder_by_id(reminder_id)
+    if not reminder or reminder["user_id"] != user_id:
+        await query.edit_message_text("Напоминание не найдено.")
+        return
+
+    if action == "pause":
+        db.toggle_reminder_active(reminder_id, False)
+        await query.edit_message_text(
+            f"⏸ Напоминание приостановлено.\n\n"
+            f"📝 {reminder['text']}\n\n"
+            f"Для возобновления используй /my_reminders"
+        )
+
+    elif action == "resume":
+        db.toggle_reminder_active(reminder_id, True)
+        await query.edit_message_text(
+            f"▶️ Напоминание возобновлено!\n\n"
+            f"📝 {reminder['text']}"
+        )
+
+    elif action == "delete":
+        # Подтверждение удаления
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_del_{reminder_id}"),
+                InlineKeyboardButton("❌ Отмена", callback_data=f"manage_{reminder_id}"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"Удалить напоминание?\n\n📝 {reminder['text']}",
+            reply_markup=reply_markup
+        )
+
+    elif action == "confirm" and parts[1] == "del":
+        db.delete_reminder(reminder_id)
+        await query.edit_message_text(
+            f"🗑 Напоминание удалено.\n\n"
+            f"Управление напоминаниями: /my_reminders"
+        )
+
+    elif action == "no" and parts[1] == "recur":
+        db.disable_reminder_recurring(reminder_id)
+        await query.edit_message_text(
+            f"🔄 Повторение отключено.\n\n"
+            f"📝 {reminder['text']}\n\n"
+            f"Напоминание больше не будет повторяться."
+        )
+
+    elif action == "yes" and parts[1] == "recur":
+        db.update_reminder(reminder_id, is_recurring=True)
+        await query.edit_message_text(
+            f"🔄 Повторение включено!\n\n"
+            f"📝 {reminder['text']}\n\n"
+            f"Напоминание будет повторяться еженедельно."
+        )
+
+    elif action == "edit" and parts[1] == "text":
+        set_user_state(user_id, STATE_EDIT_REMINDER_TEXT, {"reminder_id": reminder_id})
+        await query.edit_message_text(
+            f"Текущий текст: {reminder['text']}\n\n"
+            f"Введи новый текст напоминания:"
+        )
+
+    elif action == "edit" and parts[1] == "time":
+        set_user_state(user_id, STATE_EDIT_REMINDER_DAY, {"reminder_id": reminder_id})
+
+        from datetime import timedelta
+        today = datetime.now()
+
+        keyboard = [
+            [
+                InlineKeyboardButton("Сегодня", callback_data="editday_today"),
+                InlineKeyboardButton("Завтра", callback_data="editday_tomorrow"),
+            ],
+        ]
+
+        days_row = []
+        for i in range(7):
+            day = (today + timedelta(days=i)).weekday()
+            day_name = DAYS_OF_WEEK[day][:2]
+            days_row.append(InlineKeyboardButton(day_name, callback_data=f"editday_week_{day}"))
+            if len(days_row) == 4:
+                keyboard.append(days_row)
+                days_row = []
+        if days_row:
+            keyboard.append(days_row)
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            f"📝 {reminder['text']}\n\n"
+            f"Выбери новый день:",
+            reply_markup=reply_markup
+        )
+
+
+async def handle_edit_reminder_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка редактирования текста напоминания"""
+    user_id = update.effective_user.id
+    state = get_user_state(user_id)
+
+    if state != STATE_EDIT_REMINDER_TEXT:
+        return False
+
+    new_text = update.message.text.strip()
+    user_data = get_user_data(user_id)
+    reminder_id = user_data.get("reminder_id")
+
+    if not reminder_id:
+        await update.message.reply_text("Что-то пошло не так. Попробуй /my_reminders")
+        clear_user_state(user_id)
+        return True
+
+    db.update_reminder(reminder_id, text=new_text)
+    clear_user_state(user_id)
+
+    await update.message.reply_text(
+        f"✅ Текст напоминания обновлён!\n\n"
+        f"📝 {new_text}"
+    )
+    return True
+
+
+async def handle_edit_day_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка редактирования дня напоминания"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+    user_data = get_user_data(user_id)
+
+    reminder_id = user_data.get("reminder_id")
+    if not reminder_id:
+        await query.edit_message_text("Что-то пошло не так. Попробуй /my_reminders")
+        return
+
+    from datetime import timedelta
+    now = datetime.now()
+
+    if data == "editday_today":
+        user_data["day"] = now.weekday()
+        user_data["date"] = now.date().isoformat()
+    elif data == "editday_tomorrow":
+        tomorrow = now + timedelta(days=1)
+        user_data["day"] = tomorrow.weekday()
+        user_data["date"] = tomorrow.date().isoformat()
+    elif data.startswith("editday_week_"):
+        day_of_week = int(data.replace("editday_week_", ""))
+        user_data["day"] = day_of_week
+        days_ahead = day_of_week - now.weekday()
+        if days_ahead < 0:
+            days_ahead += 7
+        target_date = now + timedelta(days=days_ahead)
+        user_data["date"] = target_date.date().isoformat()
+
+    set_user_state(user_id, STATE_EDIT_REMINDER_TIME, user_data)
+
+    day_name = DAYS_OF_WEEK[user_data["day"]]
+    await query.edit_message_text(
+        f"День: {day_name}\n\n"
+        f"Введи время в формате ЧЧ:ММ\n"
+        f"Например: 09:30 или 14:00"
+    )
+
+
+async def handle_edit_time_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка редактирования времени напоминания (ввод пользователем)"""
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    user_data = get_user_data(user_id)
+
+    reminder_id = user_data.get("reminder_id")
+    if not reminder_id or "date" not in user_data:
+        await update.message.reply_text("Что-то пошло не так. Попробуй /my_reminders")
+        clear_user_state(user_id)
+        return
+
+    # Проверяем формат времени
+    import re
+    time_match = re.match(r'^(\d{1,2}):(\d{2})$', text)
+    if not time_match:
+        await update.message.reply_text(
+            "Неверный формат времени.\n\n"
+            "Введи время в формате ЧЧ:ММ\n"
+            "Например: 09:30 или 14:00"
+        )
+        return
+
+    hours = int(time_match.group(1))
+    minutes = int(time_match.group(2))
+
+    if hours < 0 or hours > 23 or minutes < 0 or minutes > 59:
+        await update.message.reply_text(
+            "Некорректное время.\n\n"
+            "Часы: 00-23, минуты: 00-59\n"
+            "Например: 09:30 или 14:00"
+        )
+        return
+
+    pet = db.get_pet(user_id)
+    user_tz = pet.get("timezone", "+03:00")
+
+    time_str = f"{hours:02d}:{minutes:02d}"
+    date_parts = user_data["date"].split("-")
+
+    # Время пользователя
+    user_remind_at = datetime(
+        int(date_parts[0]), int(date_parts[1]), int(date_parts[2]),
+        hours, minutes
+    )
+
+    # Конвертируем в серверное время
+    server_remind_at = convert_user_time_to_server(user_remind_at, user_tz)
+
+    db.update_reminder(
+        reminder_id,
+        remind_at=server_remind_at,
+        day_of_week=user_data["day"],
+        time_of_day=time_str
+    )
+
+    # Сбрасываем флаг отправки, чтобы напоминание снова сработало
+    with db._get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE reminders SET sent = 0, status = 'pending' WHERE id = ?",
+            (reminder_id,)
+        )
+
+    clear_user_state(user_id)
+
+    day_name = DAYS_OF_WEEK[user_data["day"]]
+    await update.message.reply_text(
+        f"✅ Напоминание обновлено!\n\n"
+        f"📅 {day_name}\n"
+        f"⏰ {time_str}"
+    )
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -617,25 +1613,169 @@ async def supervisor_off_command(update: Update, context: ContextTypes.DEFAULT_T
     )
 
 
+async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопок главного меню"""
+    user_id = update.effective_user.id
+    text = update.message.text
+
+    if text == "🐾 Мой питомец":
+        await profile_command(update, context)
+        return True
+    elif text == "🔔 Напоминания":
+        await reminders_menu(update, context)
+        return True
+    elif text == "📋 История":
+        await history_command(update, context)
+        return True
+    elif text == "📄 Расшифровка":
+        await export_command(update, context)
+        return True
+
+    return False
+
+
+async def reminders_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню напоминаний"""
+    user_id = update.effective_user.id
+
+    pet = db.get_pet(user_id)
+    if not pet:
+        await update.message.reply_text(
+            "Сначала добавь питомца!\n"
+            "Нажми 🐾 Мой питомец"
+        )
+        return
+
+    # Получаем количество активных напоминаний
+    reminders = db.get_all_user_reminders(user_id)
+    count = len(reminders)
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Создать напоминание", callback_data="menu_new_reminder")],
+        [InlineKeyboardButton(f"📋 Мои напоминания ({count})", callback_data="menu_my_reminders")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "🔔 Напоминания\n\n"
+        "Выбери действие:",
+        reply_markup=reply_markup
+    )
+
+
+async def handle_reminders_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка меню напоминаний"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    if data == "menu_new_reminder":
+        set_user_state(user_id, STATE_REMINDER_TEXT)
+        await query.edit_message_text("Что нужно напомнить?")
+
+    elif data == "menu_my_reminders":
+        reminders = db.get_all_user_reminders(user_id)
+
+        if not reminders:
+            keyboard = [
+                [InlineKeyboardButton("➕ Создать напоминание", callback_data="menu_new_reminder")],
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                "У тебя пока нет напоминаний.",
+                reply_markup=reply_markup
+            )
+            return
+
+        text = "📋 Твои напоминания:\n\n"
+
+        keyboard = []
+        for r in reminders[:10]:
+            day_info = ""
+            if r.get("day_of_week") is not None:
+                day_info = f" · {DAYS_OF_WEEK[r['day_of_week']][:2]}"
+            time_info = ""
+            if r.get("time_of_day"):
+                time_info = f" {r['time_of_day']}"
+
+            if r.get("is_daily"):
+                recurring_icon = "📅"  # каждый день
+            elif r.get("is_recurring"):
+                recurring_icon = "🔄"  # каждую неделю
+            else:
+                recurring_icon = ""
+            active_icon = "⏸ " if not r.get("is_active", 1) else ""
+
+            text += f"{active_icon}{recurring_icon} {r['text'][:30]}{day_info}{time_info}\n"
+
+            keyboard.append([
+                InlineKeyboardButton(f"⚙️ {r['text'][:20]}...", callback_data=f"manage_{r['id']}")
+            ])
+
+        keyboard.append([InlineKeyboardButton("➕ Создать напоминание", callback_data="menu_new_reminder")])
+        keyboard.append([InlineKeyboardButton("« Назад", callback_data="menu_reminders_back")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text, reply_markup=reply_markup)
+
+    elif data == "menu_reminders_back":
+        reminders = db.get_all_user_reminders(user_id)
+        count = len(reminders)
+
+        keyboard = [
+            [InlineKeyboardButton("➕ Создать напоминание", callback_data="menu_new_reminder")],
+            [InlineKeyboardButton(f"📋 Мои напоминания ({count})", callback_data="menu_my_reminders")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(
+            "🔔 Напоминания\n\n"
+            "Выбери действие:",
+            reply_markup=reply_markup
+        )
+
+
 async def handle_record(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка записей (текст/фото)"""
     user_id = update.effective_user.id
-    
+
+    # Проверяем кнопки меню
+    if update.message.text and await handle_menu_buttons(update, context):
+        return
+
     # Проверяем, не в процессе ли супервизор расшифровки
     state = get_user_state(user_id)
-    
+
     if state == STATE_SUPERVISOR_TRANSCRIPTION:
         await handle_supervisor_transcription(update, context)
         return
-    
+
     if state == STATE_ONBOARDING_NAME:
         await handle_onboarding(update, context)
         return
-    
+
     if state == STATE_REMINDER_TEXT:
         await handle_reminder_flow(update, context)
         return
-    
+
+    if state == STATE_EDIT_REMINDER_TEXT:
+        await handle_edit_reminder_text(update, context)
+        return
+
+    if state == STATE_REMINDER_TIME:
+        await handle_reminder_time_input(update, context)
+        return
+
+    if state == STATE_EDIT_REMINDER_TIME:
+        await handle_edit_time_input(update, context)
+        return
+
+    if state == STATE_EDIT_PET_NAME:
+        await handle_edit_pet_name(update, context)
+        return
+
     if state == STATE_WAITING_FOR_PDF:
         return  # PDF обрабатывается отдельно
     
@@ -695,10 +1835,14 @@ def auto_detect_tag(text: str) -> Optional[str]:
 async def send_pending_reminders(context: ContextTypes.DEFAULT_TYPE):
     """Отправка напоминаний (запускается по расписанию)"""
     pending = db.get_pending_reminders()
-    
+
     for reminder in pending:
+        # Пропускаем неактивные
+        if not reminder.get("is_active", 1):
+            continue
+
         pet = db.get_pet_by_id(reminder["pet_id"])
-        
+
         keyboard = [
             [
                 InlineKeyboardButton("✅ Выполнено", callback_data=f"reminder_done_{reminder['id']}"),
@@ -706,11 +1850,15 @@ async def send_pending_reminders(context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        
+
+        recurring_info = ""
+        if reminder.get("is_recurring"):
+            recurring_info = "\n🔄 Повторяющееся"
+
         try:
             await context.bot.send_message(
                 chat_id=reminder["user_id"],
-                text=f"🔔 Напоминание:\n\n{reminder['text']}\n\n({pet['name']})",
+                text=f"🔔 Напоминание:\n\n{reminder['text']}\n\n({pet['name']}){recurring_info}",
                 reply_markup=reply_markup
             )
             db.mark_reminder_sent(reminder["id"])
@@ -718,17 +1866,139 @@ async def send_pending_reminders(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось отправить напоминание {reminder['id']}: {e}")
 
 
+async def check_recurring_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Проверка повторяющихся напоминаний в конце недели (запускается раз в день)"""
+    from datetime import timedelta
+
+    # Получаем все повторяющиеся напоминания, которые были отправлены
+    recurring = db.get_recurring_reminders_to_confirm()
+
+    for reminder in recurring:
+        pet = db.get_pet_by_id(reminder["pet_id"])
+
+        keyboard = [
+            [InlineKeyboardButton("✅ Да, повторить", callback_data=f"repeat_yes_{reminder['id']}")],
+            [InlineKeyboardButton("❌ Нет, отменить повторение", callback_data=f"repeat_no_{reminder['id']}")],
+            [InlineKeyboardButton("⏸ Приостановить", callback_data=f"repeat_pause_{reminder['id']}")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        day_name = DAYS_OF_WEEK.get(reminder.get("day_of_week"), "")
+        time_str = reminder.get("time_of_day", "")
+
+        try:
+            await context.bot.send_message(
+                chat_id=reminder["user_id"],
+                text=f"🔄 Подтверждение напоминания\n\n"
+                     f"📝 {reminder['text']}\n"
+                     f"📅 {day_name} {time_str}\n"
+                     f"🐾 {pet['name']}\n\n"
+                     f"Повторить это напоминание на следующей неделе?",
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Не удалось отправить подтверждение {reminder['id']}: {e}")
+
+
+async def handle_repeat_confirmation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка подтверждения повторения напоминания"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    data = query.data
+
+    parts = data.split("_")
+    action = parts[1]  # yes, no, pause
+    reminder_id = int(parts[2])
+
+    reminder = db.get_reminder_by_id(reminder_id)
+    if not reminder or reminder["user_id"] != user_id:
+        await query.edit_message_text("Напоминание не найдено.")
+        return
+
+    from datetime import timedelta
+
+    if action == "yes":
+        # Вычисляем следующую дату
+        day_of_week = reminder.get("day_of_week")
+        time_of_day = reminder.get("time_of_day", "12:00")
+
+        pet = db.get_pet_by_id(reminder["pet_id"])
+        user_tz = pet.get("timezone", "+03:00") if pet else "+03:00"
+
+        now = datetime.now()
+        days_ahead = day_of_week - now.weekday() + 7
+        if days_ahead <= 0:
+            days_ahead += 7
+
+        next_date = now + timedelta(days=days_ahead)
+        time_parts = time_of_day.split(":")
+
+        # Время пользователя
+        user_remind_at = datetime(
+            next_date.year, next_date.month, next_date.day,
+            int(time_parts[0]), int(time_parts[1])
+        )
+
+        # Конвертируем в серверное время
+        server_remind_at = convert_user_time_to_server(user_remind_at, user_tz)
+
+        db.reset_reminder_for_next_week(reminder_id, server_remind_at)
+
+        day_name = DAYS_OF_WEEK.get(day_of_week, "")
+        await query.edit_message_text(
+            f"✅ Напоминание повторится!\n\n"
+            f"📝 {reminder['text']}\n"
+            f"📅 Следующее: {day_name} {time_of_day}"
+        )
+
+    elif action == "no":
+        db.disable_reminder_recurring(reminder_id)
+        await query.edit_message_text(
+            f"🔄 Повторение отменено.\n\n"
+            f"📝 {reminder['text']}\n\n"
+            f"Напоминание больше не будет повторяться."
+        )
+
+    elif action == "pause":
+        db.toggle_reminder_active(reminder_id, False)
+        await query.edit_message_text(
+            f"⏸ Напоминание приостановлено.\n\n"
+            f"📝 {reminder['text']}\n\n"
+            f"Возобновить можно через /my_reminders"
+        )
+
+
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Роутер для callback запросов"""
     query = update.callback_query
     data = query.data
-    
+
     if data.startswith("pet_type_"):
         await handle_pet_type_callback(update, context)
+    elif data.startswith("pet_"):
+        await handle_pet_edit_callback(update, context)
+    elif data.startswith("tz_"):
+        await handle_timezone_callback(update, context)
+    elif data.startswith("day_"):
+        await handle_reminder_day_callback(update, context)
+    elif data.startswith("recurring_"):
+        await handle_recurring_callback(update, context)
+    elif data.startswith("menu_"):
+        await handle_reminders_menu_callback(update, context)
     elif data.startswith("remind_"):
         await handle_reminder_time_callback(update, context)
     elif data.startswith("reminder_"):
         await handle_reminder_action(update, context)
+    elif data.startswith("manage_") or data == "new_reminder" or data == "back_to_list":
+        await handle_manage_reminder_callback(update, context)
+    elif data.startswith(("pause_", "resume_", "delete_", "confirm_del_", "no_recur_", "yes_recur_", "edit_text_", "edit_time_")):
+        await handle_reminder_actions_callback(update, context)
+    elif data.startswith("editday_"):
+        await handle_edit_day_callback(update, context)
+    elif data.startswith("repeat_"):
+        await handle_repeat_confirmation_callback(update, context)
     elif data.startswith("take_request_"):
         await handle_take_request_callback(update, context)
 
@@ -737,41 +2007,50 @@ def main():
     """Запуск бота"""
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
-        print("❌ Установите TELEGRAM_BOT_TOKEN в переменных окружения")
-        print("   export TELEGRAM_BOT_TOKEN='ваш_токен'")
+        print("ERROR: Set TELEGRAM_BOT_TOKEN environment variable")
+        print("   export TELEGRAM_BOT_TOKEN='your_token'")
         return
-    
+
     # Создаём приложение
     app = Application.builder().token(token).build()
-    
+
     # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("profile", profile_command))
     app.add_handler(CommandHandler("reminder", reminder_command))
+    app.add_handler(CommandHandler("my_reminders", my_reminders_command))
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("reminders", reminders_command))
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CommandHandler("pending", pending_command))
     app.add_handler(CommandHandler("supervisor_on", supervisor_on_command))
     app.add_handler(CommandHandler("supervisor_off", supervisor_off_command))
-    
+
     # Callback обработчики
     app.add_handler(CallbackQueryHandler(callback_router))
-    
+
     # Обработчик PDF документов
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_for_transcription))
-    
+
     # Обработчик записей (текст и фото)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_record))
     app.add_handler(MessageHandler(filters.PHOTO, handle_record))
-    
+
     # Запускаем проверку напоминаний каждую минуту
     job_queue = app.job_queue
     job_queue.run_repeating(send_pending_reminders, interval=60, first=10)
-    
-    print("🚀 Бот запущен!")
-    print("📋 Доступные команды:")
-    print("   /supervisor_on — активировать режим супервизора")
-    print("   /supervisor_off — деактивировать режим супервизора")
+
+    # Проверяем повторяющиеся напоминания раз в день (в 10:00)
+    from datetime import time as time_type
+    job_queue.run_daily(check_recurring_reminders, time=time_type(hour=10, minute=0))
+
+    print("Bot started!")
+    print("Commands:")
+    print("   /reminder - create reminder")
+    print("   /my_reminders - manage reminders")
+    print("   /history - view history")
+    print("   /supervisor_on - enable supervisor mode")
+    print("   /supervisor_off - disable supervisor mode")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

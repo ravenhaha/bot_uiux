@@ -36,10 +36,17 @@ class Database:
                     user_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
                     type TEXT NOT NULL,
+                    timezone TEXT DEFAULT '+03:00',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id)
                 )
             """)
+
+            # Миграция: добавляем timezone если его нет
+            cursor.execute("PRAGMA table_info(pets)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'timezone' not in columns:
+                cursor.execute("ALTER TABLE pets ADD COLUMN timezone TEXT DEFAULT '+03:00'")
             
             # Таблица записей
             cursor.execute("""
@@ -64,12 +71,31 @@ class Database:
                     pet_id INTEGER NOT NULL,
                     text TEXT NOT NULL,
                     remind_at TIMESTAMP NOT NULL,
+                    day_of_week INTEGER,
+                    time_of_day TEXT,
+                    is_recurring INTEGER DEFAULT 0,
+                    is_daily INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 1,
                     status TEXT DEFAULT 'pending',
                     sent INTEGER DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (pet_id) REFERENCES pets(id)
                 )
             """)
+
+            # Миграция: добавляем новые поля если их нет
+            cursor.execute("PRAGMA table_info(reminders)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'day_of_week' not in columns:
+                cursor.execute("ALTER TABLE reminders ADD COLUMN day_of_week INTEGER")
+            if 'time_of_day' not in columns:
+                cursor.execute("ALTER TABLE reminders ADD COLUMN time_of_day TEXT")
+            if 'is_recurring' not in columns:
+                cursor.execute("ALTER TABLE reminders ADD COLUMN is_recurring INTEGER DEFAULT 0")
+            if 'is_daily' not in columns:
+                cursor.execute("ALTER TABLE reminders ADD COLUMN is_daily INTEGER DEFAULT 0")
+            if 'is_active' not in columns:
+                cursor.execute("ALTER TABLE reminders ADD COLUMN is_active INTEGER DEFAULT 1")
             
             # Таблица супервизоров
             cursor.execute("""
@@ -108,15 +134,58 @@ class Database:
     
     # === Питомцы ===
     
-    def create_pet(self, user_id: int, name: str, pet_type: str) -> int:
+    def create_pet(self, user_id: int, name: str, pet_type: str, timezone: str = '+03:00') -> int:
         """Создать питомца"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT OR REPLACE INTO pets (user_id, name, type) VALUES (?, ?, ?)",
-                (user_id, name, pet_type)
+                "INSERT OR REPLACE INTO pets (user_id, name, type, timezone) VALUES (?, ?, ?, ?)",
+                (user_id, name, pet_type, timezone)
             )
             return cursor.lastrowid
+
+    def update_pet_timezone(self, user_id: int, timezone: str):
+        """Обновить часовой пояс питомца"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE pets SET timezone = ? WHERE user_id = ?",
+                (timezone, user_id)
+            )
+
+    def update_pet_name(self, user_id: int, name: str):
+        """Обновить имя питомца"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE pets SET name = ? WHERE user_id = ?",
+                (name, user_id)
+            )
+
+    def update_pet_type(self, user_id: int, pet_type: str):
+        """Обновить тип питомца"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE pets SET type = ? WHERE user_id = ?",
+                (pet_type, user_id)
+            )
+
+    def delete_pet(self, user_id: int):
+        """Удалить питомца и все связанные данные"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Получаем pet_id
+            cursor.execute("SELECT id FROM pets WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                pet_id = row[0]
+                # Удаляем связанные записи
+                cursor.execute("DELETE FROM records WHERE pet_id = ?", (pet_id,))
+                cursor.execute("DELETE FROM reminders WHERE pet_id = ?", (pet_id,))
+                cursor.execute("DELETE FROM transcription_requests WHERE pet_id = ?", (pet_id,))
+            # Удаляем питомца
+            cursor.execute("DELETE FROM pets WHERE user_id = ?", (user_id,))
     
     def get_pet(self, user_id: int) -> Optional[Dict]:
         """Получить питомца пользователя"""
@@ -210,14 +279,25 @@ class Database:
     
     # === Напоминания ===
     
-    def create_reminder(self, user_id: int, pet_id: int, text: str, remind_at: datetime) -> int:
+    def create_reminder(
+        self,
+        user_id: int,
+        pet_id: int,
+        text: str,
+        remind_at: datetime,
+        day_of_week: int = None,
+        time_of_day: str = None,
+        is_recurring: bool = False,
+        is_daily: bool = False
+    ) -> int:
         """Создать напоминание"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """INSERT INTO reminders (user_id, pet_id, text, remind_at) 
-                   VALUES (?, ?, ?, ?)""",
-                (user_id, pet_id, text, remind_at.isoformat())
+                """INSERT INTO reminders
+                   (user_id, pet_id, text, remind_at, day_of_week, time_of_day, is_recurring, is_daily, is_active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                (user_id, pet_id, text, remind_at.isoformat(), day_of_week, time_of_day, int(is_recurring), int(is_daily))
             )
             return cursor.lastrowid
     
@@ -270,10 +350,116 @@ class Database:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                """SELECT * FROM reminders 
-                   WHERE pet_id = ? AND status = 'pending'
+                """SELECT * FROM reminders
+                   WHERE pet_id = ? AND status = 'pending' AND is_active = 1
                    ORDER BY remind_at ASC""",
                 (pet_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_all_user_reminders(self, user_id: int) -> List[Dict]:
+        """Получить все напоминания пользователя (активные и приостановленные)"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT * FROM reminders
+                   WHERE user_id = ? AND status = 'pending'
+                   ORDER BY remind_at ASC""",
+                (user_id,)
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_reminder_by_id(self, reminder_id: int) -> Optional[Dict]:
+        """Получить напоминание по ID"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def update_reminder(
+        self,
+        reminder_id: int,
+        text: str = None,
+        remind_at: datetime = None,
+        day_of_week: int = None,
+        time_of_day: str = None,
+        is_recurring: bool = None,
+        is_active: bool = None
+    ):
+        """Обновить напоминание"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            updates = []
+            params = []
+
+            if text is not None:
+                updates.append("text = ?")
+                params.append(text)
+            if remind_at is not None:
+                updates.append("remind_at = ?")
+                params.append(remind_at.isoformat())
+            if day_of_week is not None:
+                updates.append("day_of_week = ?")
+                params.append(day_of_week)
+            if time_of_day is not None:
+                updates.append("time_of_day = ?")
+                params.append(time_of_day)
+            if is_recurring is not None:
+                updates.append("is_recurring = ?")
+                params.append(int(is_recurring))
+            if is_active is not None:
+                updates.append("is_active = ?")
+                params.append(int(is_active))
+
+            if updates:
+                params.append(reminder_id)
+                cursor.execute(
+                    f"UPDATE reminders SET {', '.join(updates)} WHERE id = ?",
+                    params
+                )
+
+    def delete_reminder(self, reminder_id: int):
+        """Удалить напоминание"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))
+
+    def toggle_reminder_active(self, reminder_id: int, is_active: bool):
+        """Включить/выключить напоминание"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE reminders SET is_active = ? WHERE id = ?",
+                (int(is_active), reminder_id)
+            )
+
+    def disable_reminder_recurring(self, reminder_id: int):
+        """Отключить повторение напоминания"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE reminders SET is_recurring = 0 WHERE id = ?",
+                (reminder_id,)
+            )
+
+    def reset_reminder_for_next_week(self, reminder_id: int, next_remind_at: datetime):
+        """Сбросить напоминание для следующей недели"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE reminders SET remind_at = ?, sent = 0, status = 'pending' WHERE id = ?",
+                (next_remind_at.isoformat(), reminder_id)
+            )
+
+    def get_recurring_reminders_to_confirm(self) -> List[Dict]:
+        """Получить повторяющиеся напоминания для подтверждения (в конце недели)"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT * FROM reminders
+                   WHERE is_recurring = 1 AND is_active = 1 AND sent = 1 AND status != 'pending'
+                   ORDER BY remind_at ASC"""
             )
             return [dict(row) for row in cursor.fetchall()]
     
